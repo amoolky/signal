@@ -1,0 +1,790 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/architectural-program-model.schema.json",
+  "title": "Architectural Program + 2D Model Link Schema",
+  "description": "Canonical normalized JSON format for an architectural program spreadsheet linked to 2D model/drawing elements.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project",
+    "units",
+    "floors",
+    "departments",
+    "program_groups",
+    "program_items"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "project_number": {
+          "type": "string"
+        },
+        "client": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source_files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_file"
+          }
+        }
+      }
+    },
+    "units": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "area",
+        "length"
+      ],
+      "properties": {
+        "area": {
+          "enum": [
+            "sf",
+            "sqm"
+          ]
+        },
+        "length": {
+          "enum": [
+            "ft",
+            "m",
+            "in",
+            "mm"
+          ]
+        },
+        "coordinate": {
+          "enum": [
+            "ft",
+            "m",
+            "px",
+            "model_units"
+          ]
+        }
+      }
+    },
+    "calculation_rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "program_item_total_nsf": {
+          "const": "quantity * nsf_per_unit",
+          "description": "Computed, not stored redundantly on program_items unless exported as a cache."
+        },
+        "department_net_nsf": {
+          "const": "sum(program_item_total_nsf for program_items in department)"
+        },
+        "department_gross_dgsf": {
+          "const": "department_net_nsf * grossing_factor"
+        },
+        "rounding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "area_decimals": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "factor_decimals": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "floors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/floor"
+      },
+      "uniqueItems": true
+    },
+    "departments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/department"
+      }
+    },
+    "program_groups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/program_group"
+      }
+    },
+    "program_items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/program_item"
+      }
+    },
+    "drawings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/drawing"
+      }
+    },
+    "model_elements": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/model_element"
+      }
+    },
+    "model_links": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/model_link"
+      },
+      "description": "Join table between program items and model elements. This avoids duplicating model references on every program item."
+    },
+    "derived_totals_cache": {
+      "type": "object",
+      "description": "Optional UI/export cache. Values here should be recalculated from canonical entities and should not be treated as source of truth.",
+      "readOnly": true,
+      "additionalProperties": false,
+      "properties": {
+        "project_net_nsf": {
+          "type": "number"
+        },
+        "project_gross_dgsf": {
+          "type": "number"
+        },
+        "department_totals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "department_id",
+              "net_nsf",
+              "grossing_factor",
+              "gross_dgsf"
+            ],
+            "properties": {
+              "department_id": {
+                "type": "string"
+              },
+              "net_nsf": {
+                "type": "number"
+              },
+              "grossing_factor": {
+                "type": "number"
+              },
+              "gross_dgsf": {
+                "type": "number"
+              },
+              "program_count": {
+                "type": "integer"
+              },
+              "floor_numbers": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "validation_issues": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/validation_issue"
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "source_file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "format"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "format": {
+          "enum": [
+            "xlsx",
+            "csv",
+            "json",
+            "ifc",
+            "dwg",
+            "dxf",
+            "pdf",
+            "svg",
+            "other"
+          ]
+        },
+        "uri": {
+          "type": "string"
+        },
+        "imported_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "checksum": {
+          "type": "string"
+        }
+      }
+    },
+    "source_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_file_id": {
+          "type": "string"
+        },
+        "sheet_name": {
+          "type": "string"
+        },
+        "row": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "column": {
+          "type": "string"
+        },
+        "cell": {
+          "type": "string"
+        },
+        "original_label": {
+          "type": "string"
+        }
+      }
+    },
+    "floor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "number",
+        "name"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Ground floor is 1."
+        },
+        "name": {
+          "type": "string"
+        },
+        "elevation": {
+          "type": "number"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/source_ref"
+        }
+      }
+    },
+    "department": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "grossing_factor",
+        "sort_order"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "grossing_factor": {
+          "type": "number",
+          "minimum": 1
+        },
+        "macro_program_placeholder_dgsf": {
+          "type": "number",
+          "description": "Optional target/placeholder gross area from the spreadsheet top block; not required if equal to computed gross DGSF."
+        },
+        "sort_order": {
+          "type": "integer"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/source_ref"
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "program_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "department_id",
+        "name",
+        "sort_order"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "department_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "default_floor_id": {
+          "type": "string",
+          "description": "Use only when most or all items in this group share a floor. Individual program_items may override with floor_id."
+        },
+        "sort_order": {
+          "type": "integer"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/source_ref"
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "program_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "program_group_id",
+        "name",
+        "quantity",
+        "nsf_per_unit",
+        "floor_id",
+        "sort_order"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "program_group_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "quantity": {
+          "type": "number",
+          "minimum": 0
+        },
+        "nsf_per_unit": {
+          "type": "number",
+          "minimum": 0
+        },
+        "floor_id": {
+          "type": "string"
+        },
+        "comment": {
+          "type": "string"
+        },
+        "sort_order": {
+          "type": "integer"
+        },
+        "program_type": {
+          "type": "string",
+          "description": "Optional normalized category such as patient_care, public, support, mechanical, storage."
+        },
+        "status": {
+          "enum": [
+            "planned",
+            "linked",
+            "partially_linked",
+            "modeled",
+            "over_area",
+            "under_area",
+            "removed"
+          ]
+        },
+        "source_ref": {
+          "$ref": "#/$defs/source_ref"
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "drawing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "floor_id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "floor_id": {
+          "type": "string"
+        },
+        "source_file_id": {
+          "type": "string"
+        },
+        "coordinate_system": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "origin": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 2,
+              "maxItems": 3
+            },
+            "scale": {
+              "type": "number"
+            },
+            "rotation_degrees": {
+              "type": "number"
+            },
+            "units": {
+              "enum": [
+                "ft",
+                "m",
+                "px",
+                "model_units"
+              ]
+            }
+          }
+        },
+        "bounds": {
+          "$ref": "#/$defs/bbox_2d"
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "model_element": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "name",
+        "floor_id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "external_id": {
+          "type": "string",
+          "description": "ID from CAD/BIM/model source if different from canonical id."
+        },
+        "type": {
+          "enum": [
+            "room",
+            "area",
+            "zone",
+            "department_boundary",
+            "wall",
+            "door",
+            "equipment",
+            "annotation",
+            "other"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "floor_id": {
+          "type": "string"
+        },
+        "drawing_id": {
+          "type": "string"
+        },
+        "geometry_2d": {
+          "$ref": "#/$defs/geometry_2d"
+        },
+        "measured_area": {
+          "type": "number",
+          "minimum": 0
+        },
+        "properties": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "source_ref": {
+          "$ref": "#/$defs/source_ref"
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "model_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "program_item_id",
+        "model_element_id",
+        "link_type",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "program_item_id": {
+          "type": "string"
+        },
+        "model_element_id": {
+          "type": "string"
+        },
+        "link_type": {
+          "enum": [
+            "program_to_room",
+            "program_to_area",
+            "program_to_zone",
+            "program_to_equipment",
+            "reference_only"
+          ]
+        },
+        "status": {
+          "enum": [
+            "active",
+            "proposed",
+            "broken",
+            "archived"
+          ]
+        },
+        "sync_direction": {
+          "enum": [
+            "program_to_model",
+            "model_to_program",
+            "bidirectional",
+            "none"
+          ]
+        },
+        "area_tolerance_percent": {
+          "type": "number",
+          "minimum": 0
+        },
+        "last_synced_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    },
+    "geometry_2d": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/point_2d"
+        },
+        {
+          "$ref": "#/$defs/polyline_2d"
+        },
+        {
+          "$ref": "#/$defs/polygon_2d"
+        },
+        {
+          "$ref": "#/$defs/bbox_2d"
+        }
+      ]
+    },
+    "point_2d": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "coordinates"
+      ],
+      "properties": {
+        "type": {
+          "const": "Point"
+        },
+        "coordinates": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    },
+    "polyline_2d": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "coordinates"
+      ],
+      "properties": {
+        "type": {
+          "const": "Polyline"
+        },
+        "coordinates": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "minItems": 2
+        }
+      }
+    },
+    "polygon_2d": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "rings"
+      ],
+      "properties": {
+        "type": {
+          "const": "Polygon"
+        },
+        "rings": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "minItems": 4
+          },
+          "minItems": 1
+        }
+      }
+    },
+    "bbox_2d": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "min",
+        "max"
+      ],
+      "properties": {
+        "type": {
+          "const": "BBox"
+        },
+        "min": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "max": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    },
+    "validation_issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "severity",
+        "message"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "warning",
+            "error"
+          ]
+        },
+        "entity_type": {
+          "type": "string"
+        },
+        "entity_id": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

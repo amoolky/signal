@@ -1,0 +1,19 @@
+{
+  "name": "signal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "parse": "node scripts/parse-program.mjs --input input_test/medical_hospital_program.xlsx --schema input_test/program_schema.json --output output/program_data.json"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.0.0",
+    "vite": "^7.0.0"
+  }
+}
