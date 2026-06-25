@@ -9,19 +9,84 @@ const DEFAULT_SCHEMA = "input_test/program_schema.json";
 const DEFAULT_OUTPUT = "output/program_data.json";
 const AREA_TOLERANCE = 0.01;
 const GROSS_TOLERANCE = 0.1;
+const TABLE_DISPLAY_COLUMN_KEYS = [
+  "department",
+  "programGroup",
+  "program",
+  "quantity",
+  "nsfPerUnit",
+  "totalNsf",
+  "floor",
+  "comments",
+];
+const DEFAULT_TABLE_DISPLAY_LABELS = {
+  department: "Department",
+  programGroup: "Functional Area",
+};
+const DEPARTMENT_TABLE_LAYOUTS = [
+  {
+    name: "canonical",
+    columns: {
+      program: "A",
+      quantity: "B",
+      nsfPerUnit: "C",
+      totalNsf: "D",
+      floor: "E",
+      comments: "F",
+    },
+    groupColumn: "A",
+    subtotalLabelColumn: "C",
+    subtotalValueColumn: "D",
+    headerMatches: (row) =>
+      normalizeText(getCellText(row, "A")) === "program" && normalizeText(getCellText(row, "B")) === "quantity",
+  },
+  {
+    name: "planning-program",
+    columns: {
+      program: "C",
+      quantity: "E",
+      nsfPerUnit: "F",
+      totalNsf: "G",
+      floor: undefined,
+      comments: "H",
+    },
+    groupColumn: "A",
+    subtotalLabelColumn: "F",
+    subtotalValueColumn: "G",
+    defaultHeaders: {
+      program: "Program",
+      floor: "Floor",
+    },
+    skipLabelOnlyProgramRows: true,
+    headerMatches: (row) =>
+      normalizeText(getCellText(row, "E")) === "quantity" &&
+      normalizeText(getCellText(row, "F")).includes("nsf") &&
+      normalizeText(getCellText(row, "G")).includes("total"),
+  },
+];
 
 export function parseProgramWorkbook({
   workbookPath = DEFAULT_INPUT,
+  workbookBuffer,
+  workbookName,
   schemaPath = DEFAULT_SCHEMA,
   generatedAt = new Date().toISOString(),
 } = {}) {
-  const absoluteWorkbookPath = path.resolve(workbookPath);
+  const hasWorkbookBuffer = workbookBuffer !== undefined && workbookBuffer !== null;
+  const absoluteWorkbookPath = hasWorkbookBuffer ? undefined : path.resolve(workbookPath);
+  const sourceFileName = sanitizeSourceFileName(
+    workbookName ?? (absoluteWorkbookPath ? path.basename(absoluteWorkbookPath) : "import.xlsx"),
+  );
+  const sourceFileUri = absoluteWorkbookPath ? toProjectRelativePath(absoluteWorkbookPath) : undefined;
+  const workbookData = Buffer.from(hasWorkbookBuffer ? workbookBuffer : fs.readFileSync(absoluteWorkbookPath));
   const absoluteSchemaPath = path.resolve(schemaPath);
   const schema = JSON.parse(fs.readFileSync(absoluteSchemaPath, "utf8"));
-  const workbook = readXlsxWorkbook(absoluteWorkbookPath);
+  const workbook = readXlsxWorkbook(workbookData);
   const program = buildProgramModel({
     workbook,
-    workbookPath: absoluteWorkbookPath,
+    sourceFileName,
+    sourceFileUri,
+    sourceChecksum: sha256Buffer(workbookData),
     schema,
     schemaPath: absoluteSchemaPath,
     generatedAt,
@@ -36,16 +101,16 @@ export function parseProgramWorkbook({
   return program;
 }
 
-function buildProgramModel({ workbook, workbookPath, schema, schemaPath, generatedAt }) {
+function buildProgramModel({ workbook, sourceFileName, sourceFileUri, sourceChecksum, schema, schemaPath, generatedAt }) {
   const issues = [];
-  const sourceFileId = `source-${slugify(path.basename(workbookPath, path.extname(workbookPath)))}`;
+  const sourceFileId = `source-${slugify(path.basename(sourceFileName, path.extname(sourceFileName)))}`;
   const sourceFile = {
     id: sourceFileId,
-    name: path.basename(workbookPath),
+    name: sourceFileName,
     format: "xlsx",
-    uri: toProjectRelativePath(workbookPath),
+    uri: sourceFileUri,
     imported_at: generatedAt,
-    checksum: sha256File(workbookPath),
+    checksum: sourceChecksum,
   };
 
   const summarySheet = workbook.sheets.find((sheet) => normalizeText(sheet.name) === "summary");
@@ -67,6 +132,7 @@ function buildProgramModel({ workbook, workbookPath, schema, schemaPath, generat
   const programGroups = [];
   const programItems = [];
   const departmentRecords = [];
+  const tableColumnHeaders = new Map();
   let issueCounter = issues.length;
   let globalGroupSort = 0;
   let globalItemSort = 0;
@@ -87,6 +153,7 @@ function buildProgramModel({ workbook, workbookPath, schema, schemaPath, generat
 
   for (const [sheetIndex, sheet] of departmentSheets.entries()) {
     const parsedSheet = parseDepartmentSheet(sheet);
+    mergeTableColumnHeaders(tableColumnHeaders, parsedSheet.columnHeaders);
     const summaryRecord = findSummaryRecord(departmentSummaryByKey, sheet.name);
     const departmentName = summaryRecord?.name ?? parsedSheet.name ?? sheet.name;
     const departmentSlug = slugify(departmentName);
@@ -380,12 +447,14 @@ function buildProgramModel({ workbook, workbookPath, schema, schemaPath, generat
         parsed_group_count: programGroups.length,
         parsed_program_item_count: programItems.length,
       },
+      table_display: {
+        columns: createTableDisplayColumns(tableColumnHeaders),
+      },
     },
   });
 }
 
-function readXlsxWorkbook(workbookPath) {
-  const buffer = fs.readFileSync(workbookPath);
+function readXlsxWorkbook(buffer) {
   const zipEntries = readZipEntries(buffer);
   const sharedStrings = parseSharedStrings(bufferToString(zipEntries.get("xl/sharedStrings.xml")));
   const relationships = parseRelationships(bufferToString(zipEntries.get("xl/_rels/workbook.xml.rels")));
@@ -595,80 +664,92 @@ function emptySummary() {
 }
 
 function parseDepartmentSheet(sheet) {
+  const titleRow = sheet.rows.find((row) => getCellText(row, "A"));
   const parsed = {
-    name: sheet.name,
-    titleRowNumber: 1,
+    name: normalizeDisplayLabel(sheet.name) || sheet.name,
+    titleRowNumber: titleRow?.number ?? 1,
     groups: [],
   };
 
   for (const row of sheet.rows) {
-    const labelB = normalizeText(getCellText(row, "B"));
-    const labelC = normalizeText(getCellText(row, "C"));
-
-    if (labelB.startsWith("departmental net")) {
-      parsed.netSqFeet = numberValue(getCell(row, "C"));
-    }
-    if (labelB.startsWith("departmental grossing")) {
-      parsed.grossingFactor = numberValue(getCell(row, "C"));
-    }
-    if (labelB.startsWith("departmental gross sq")) {
-      parsed.grossSqFeet = numberValue(getCell(row, "C"));
-    }
-    if (normalizeText(getCellText(row, "D")).startsWith("macro program placeholder")) {
-      parsed.macroProgramPlaceholderDgsf = numberValue(getCell(row, "E"));
-    }
-    if (labelC === "grossing factor") {
-      parsed.grossingFactor = parsed.grossingFactor ?? numberValue(getCell(row, "D"));
-    }
-    if (labelC === "dgsf subtotal") {
-      parsed.grossSqFeet = parsed.grossSqFeet ?? numberValue(getCell(row, "D"));
-    }
+    readDepartmentMetrics(parsed, row);
   }
 
-  const headerIndex = sheet.rows.findIndex(
-    (row) => normalizeText(getCellText(row, "A")) === "program" && normalizeText(getCellText(row, "B")) === "quantity",
-  );
+  const { layout, headerIndex } = detectDepartmentTableLayout(sheet);
 
-  if (headerIndex < 0) {
+  if (!layout || headerIndex < 0) {
     return parsed;
   }
 
+  parsed.columnHeaders = readDepartmentColumnHeaders(sheet.rows[headerIndex], layout);
+
   let currentGroup;
   for (const row of sheet.rows.slice(headerIndex + 1)) {
-    const label = getCellText(row, "A");
-    const quantity = numberValue(getCell(row, "B"));
-    const nsfPerUnit = numberValue(getCell(row, "C"));
-    const spreadsheetTotalNsf = numberValue(getCell(row, "D"));
-    const floorLabel = getCellText(row, "E");
-    const comment = getCellText(row, "F");
-    const cLabel = normalizeText(getCellText(row, "C"));
-    const rowHasData = Boolean(label || quantity != null || nsfPerUnit != null || spreadsheetTotalNsf != null || floorLabel || comment);
+    const label = getLayoutCellText(row, layout, "program");
+    const groupLabel = getCellText(row, layout.groupColumn);
+    const quantity = getLayoutNumber(row, layout, "quantity");
+    const nsfPerUnit = getLayoutNumber(row, layout, "nsfPerUnit");
+    const spreadsheetTotalNsf = getLayoutNumber(row, layout, "totalNsf");
+    const floorLabel = getLayoutCellText(row, layout, "floor");
+    const comment = getLayoutCellText(row, layout, "comments");
+    const subtotalLabel = normalizeText(getCellText(row, layout.subtotalLabelColumn));
+    const subtotalValue = numberValue(getCell(row, layout.subtotalValueColumn));
+    const rowHasData = Boolean(
+      groupLabel ||
+        label ||
+        quantity != null ||
+        nsfPerUnit != null ||
+        spreadsheetTotalNsf != null ||
+        floorLabel ||
+        comment ||
+        subtotalLabel,
+    );
 
     if (!rowHasData) {
       continue;
     }
 
-    if (cLabel === "nsf subtotal") {
+    if (subtotalLabel === "nsf subtotal") {
       if (currentGroup && currentGroup.lastItemRowNumber === row.number - 1) {
-        currentGroup.spreadsheetSubtotalNsf = spreadsheetTotalNsf;
+        currentGroup.spreadsheetSubtotalNsf = subtotalValue;
       } else {
-        parsed.departmentSubtotalNsf = spreadsheetTotalNsf;
+        parsed.departmentSubtotalNsf = subtotalValue;
       }
       continue;
     }
 
-    if (cLabel === "grossing factor" || cLabel === "dgsf subtotal") {
+    if (subtotalLabel === "grossing factor" || subtotalLabel === "dgsf subtotal") {
       continue;
     }
 
-    const isGroupHeader = Boolean(label && quantity == null && nsfPerUnit == null && spreadsheetTotalNsf == null && !floorLabel && !comment);
+    const isGroupHeader = isDepartmentGroupHeader(layout, {
+      groupLabel,
+      label,
+      quantity,
+      nsfPerUnit,
+      spreadsheetTotalNsf,
+      floorLabel,
+      comment,
+    });
     if (isGroupHeader) {
       currentGroup = {
-        name: label,
+        name: groupLabel || label,
         rowNumber: row.number,
         items: [],
       };
       parsed.groups.push(currentGroup);
+      continue;
+    }
+
+    if (
+      layout.skipLabelOnlyProgramRows &&
+      label &&
+      quantity == null &&
+      nsfPerUnit == null &&
+      spreadsheetTotalNsf == null &&
+      !floorLabel &&
+      !comment
+    ) {
       continue;
     }
 
@@ -698,6 +779,130 @@ function parseDepartmentSheet(sheet) {
   }
 
   return parsed;
+}
+
+function readDepartmentMetrics(parsed, row) {
+  const labelB = normalizeText(getCellText(row, "B"));
+  const labelC = normalizeText(getCellText(row, "C"));
+  const labelD = normalizeText(getCellText(row, "D"));
+  const labelH = normalizeText(getCellText(row, "H"));
+
+  if (labelB.startsWith("departmental net")) {
+    parsed.netSqFeet = parsed.netSqFeet ?? numberValue(getCell(row, "C"));
+  }
+  if (labelC.startsWith("departmental net")) {
+    parsed.netSqFeet = parsed.netSqFeet ?? numberValue(getCell(row, "D"));
+  }
+  if (labelB.startsWith("departmental grossing")) {
+    parsed.grossingFactor = parsed.grossingFactor ?? numberValue(getCell(row, "C"));
+  }
+  if (labelC.startsWith("departmental grossing")) {
+    parsed.grossingFactor = parsed.grossingFactor ?? numberValue(getCell(row, "D"));
+  }
+  if (labelB.startsWith("departmental gross sq")) {
+    parsed.grossSqFeet = parsed.grossSqFeet ?? numberValue(getCell(row, "C"));
+  }
+  if (labelC.startsWith("departmental gross sq")) {
+    parsed.grossSqFeet = parsed.grossSqFeet ?? numberValue(getCell(row, "D"));
+  }
+  if (labelD.startsWith("macro program placeholder")) {
+    parsed.macroProgramPlaceholderDgsf =
+      parsed.macroProgramPlaceholderDgsf ?? numberValue(getCell(row, "E")) ?? numberFromText(getCellText(row, "D"));
+  }
+  if (labelH.startsWith("macro program placeholder")) {
+    parsed.macroProgramPlaceholderDgsf =
+      parsed.macroProgramPlaceholderDgsf ?? numberValue(getCell(row, "I")) ?? numberFromText(getCellText(row, "H"));
+  }
+  if (labelC === "grossing factor") {
+    parsed.grossingFactor = parsed.grossingFactor ?? numberValue(getCell(row, "D"));
+  }
+  if (labelC === "dgsf subtotal") {
+    parsed.grossSqFeet = parsed.grossSqFeet ?? numberValue(getCell(row, "D"));
+  }
+  if (normalizeText(getCellText(row, "F")) === "grossing factor") {
+    parsed.grossingFactor = parsed.grossingFactor ?? numberValue(getCell(row, "G"));
+  }
+  if (normalizeText(getCellText(row, "F")) === "dgsf subtotal") {
+    parsed.grossSqFeet = parsed.grossSqFeet ?? numberValue(getCell(row, "G"));
+  }
+}
+
+function detectDepartmentTableLayout(sheet) {
+  for (const [rowIndex, row] of sheet.rows.entries()) {
+    const layout = DEPARTMENT_TABLE_LAYOUTS.find((candidate) => candidate.headerMatches(row));
+    if (layout) {
+      return { layout, headerIndex: rowIndex };
+    }
+  }
+
+  return { layout: undefined, headerIndex: -1 };
+}
+
+function getLayoutCellText(row, layout, key) {
+  const column = layout.columns[key];
+  return column ? getCellText(row, column) : "";
+}
+
+function getLayoutNumber(row, layout, key) {
+  const column = layout.columns[key];
+  return column ? numberValue(getCell(row, column)) : undefined;
+}
+
+function isDepartmentGroupHeader(layout, values) {
+  const hasNoItemValues =
+    values.quantity == null &&
+    values.nsfPerUnit == null &&
+    values.spreadsheetTotalNsf == null &&
+    !values.floorLabel &&
+    !values.comment;
+
+  if (!hasNoItemValues) return false;
+
+  if (layout.groupColumn === layout.columns.program) {
+    return Boolean(values.label);
+  }
+
+  return Boolean(values.groupLabel && !values.label);
+}
+
+function readDepartmentColumnHeaders(row, layout) {
+  const headers = Object.fromEntries(
+    ["program", "quantity", "nsfPerUnit", "totalNsf", "floor", "comments"].map((key) => [
+      key,
+      getLayoutCellText(row, layout, key) || layout.defaultHeaders?.[key],
+    ]),
+  );
+  headers.department = DEFAULT_TABLE_DISPLAY_LABELS.department;
+  headers.programGroup =
+    layout.groupColumn === layout.columns.program
+      ? DEFAULT_TABLE_DISPLAY_LABELS.programGroup
+      : getCellText(row, layout.groupColumn) || DEFAULT_TABLE_DISPLAY_LABELS.programGroup;
+  return compactObject(headers);
+}
+
+function mergeTableColumnHeaders(headersByColumnKey, nextHeaders = {}) {
+  for (const [columnKey, label] of Object.entries(nextHeaders)) {
+    const normalizedLabel = normalizeTableDisplayLabel(columnKey, label);
+    if (!normalizedLabel || headersByColumnKey.has(columnKey)) continue;
+    headersByColumnKey.set(columnKey, normalizedLabel);
+  }
+}
+
+function createTableDisplayColumns(headersByColumnKey) {
+  return TABLE_DISPLAY_COLUMN_KEYS
+    .map((key) => ({
+      key,
+      label: headersByColumnKey.get(key) ?? DEFAULT_TABLE_DISPLAY_LABELS[key],
+    }))
+    .filter((column) => column.label);
+}
+
+function normalizeTableDisplayLabel(columnKey, label) {
+  const normalizedLabel = normalizeDisplayLabel(label);
+  if (columnKey === "programGroup" && matchKey(normalizedLabel) === "programgroup") {
+    return DEFAULT_TABLE_DISPLAY_LABELS.programGroup;
+  }
+  return normalizedLabel;
 }
 
 function validateAgainstJsonSchema(data, schema) {
@@ -883,8 +1088,12 @@ function uniqueId(base, usedIds) {
   return candidate;
 }
 
-function sha256File(filePath) {
-  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+function sha256Buffer(buffer) {
+  return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+function sanitizeSourceFileName(fileName) {
+  return path.basename(String(fileName ?? "import.xlsx")).replace(/[^\w .()-]+/g, "_").trim() || "import.xlsx";
 }
 
 function resolveWorkbookTarget(target) {
@@ -947,6 +1156,10 @@ function normalizeText(value) {
     .replace(/\s+/g, " ");
 }
 
+function normalizeDisplayLabel(value) {
+  return String(value ?? "").trim().replace(/\s+/g, " ");
+}
+
 function matchKey(value) {
   return normalizeText(value)
     .replace(/&/g, " and ")
@@ -975,6 +1188,12 @@ function numberValue(value) {
   const normalized = String(value).replace(/,/g, "").trim();
   if (!isNumericString(normalized)) return undefined;
   return Number(normalized);
+}
+
+function numberFromText(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const match = String(value ?? "").match(/-?\d[\d,]*(?:\.\d+)?(?:e[+-]?\d+)?/i);
+  return match ? numberValue(match[0]) : undefined;
 }
 
 function integerValue(value) {
@@ -1054,7 +1273,7 @@ async function main() {
   console.log(`Validation issues recorded in JSON: ${program.validation_issues.length}`);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => {
     console.error(error.message);
     process.exitCode = 1;

@@ -3,15 +3,14 @@
   "project": {
     "id": "medical-hospital-architectural-program",
     "name": "Medical / Hospital Architectural Program",
-    "created_at": "2026-06-22T21:31:48.597Z",
-    "updated_at": "2026-06-22T21:31:48.597Z",
+    "created_at": "2026-06-25T20:40:19.398Z",
+    "updated_at": "2026-06-25T20:40:26.362Z",
     "source_files": [
       {
         "id": "source-medical-hospital-program",
         "name": "medical_hospital_program.xlsx",
         "format": "xlsx",
-        "uri": "input_test/medical_hospital_program.xlsx",
-        "imported_at": "2026-06-22T21:31:48.597Z",
+        "imported_at": "2026-06-25T20:40:19.398Z",
         "checksum": "3ea4c7e2d8b3eb9fde2bc7668cd3312b840a2117ab4b6350c0ef25fa7b9fdc87"
       }
     ]
@@ -6491,7 +6490,10 @@
         "spreadsheet_total_nsf": 4560,
         "computed_total_nsf": 4560,
         "original_floor_label": "6",
-        "department_id": "dept-behavioral-health"
+        "department_id": "dept-behavioral-health",
+        "diagram_values": {
+          "floor_id": "floor-7"
+        }
       }
     },
     {
@@ -6516,7 +6518,10 @@
         "spreadsheet_total_nsf": 1320,
         "computed_total_nsf": 1320,
         "original_floor_label": "6",
-        "department_id": "dept-behavioral-health"
+        "department_id": "dept-behavioral-health",
+        "diagram_values": {
+          "floor_id": "floor-7"
+        }
       }
     },
     {
@@ -6541,7 +6546,10 @@
         "spreadsheet_total_nsf": 480,
         "computed_total_nsf": 480,
         "original_floor_label": "6",
-        "department_id": "dept-behavioral-health"
+        "department_id": "dept-behavioral-health",
+        "diagram_values": {
+          "floor_id": "floor-7"
+        }
       }
     },
     {
@@ -6567,7 +6575,10 @@
         "spreadsheet_total_nsf": 320,
         "computed_total_nsf": 320,
         "original_floor_label": "6",
-        "department_id": "dept-behavioral-health"
+        "department_id": "dept-behavioral-health",
+        "diagram_values": {
+          "floor_id": "floor-7"
+        }
       }
     },
     {
@@ -6592,7 +6603,10 @@
         "spreadsheet_total_nsf": 1200,
         "computed_total_nsf": 1200,
         "original_floor_label": "6",
-        "department_id": "dept-behavioral-health"
+        "department_id": "dept-behavioral-health",
+        "diagram_values": {
+          "floor_id": "floor-7"
+        }
       }
     },
     {
@@ -6617,7 +6631,10 @@
         "spreadsheet_total_nsf": 900,
         "computed_total_nsf": 900,
         "original_floor_label": "6",
-        "department_id": "dept-behavioral-health"
+        "department_id": "dept-behavioral-health",
+        "diagram_values": {
+          "floor_id": "floor-7"
+        }
       }
     },
     {
@@ -11574,6 +11591,42 @@
       "parsed_department_count": 25,
       "parsed_group_count": 77,
       "parsed_program_item_count": 370
+    },
+    "table_display": {
+      "columns": [
+        {
+          "key": "department",
+          "label": "Department"
+        },
+        {
+          "key": "programGroup",
+          "label": "Functional Area"
+        },
+        {
+          "key": "program",
+          "label": "Program"
+        },
+        {
+          "key": "quantity",
+          "label": "Quantity"
+        },
+        {
+          "key": "nsfPerUnit",
+          "label": "NSF/Room"
+        },
+        {
+          "key": "totalNsf",
+          "label": "Total NSF"
+        },
+        {
+          "key": "floor",
+          "label": "Floor"
+        },
+        {
+          "key": "comments",
+          "label": "Comment"
+        }
+      ]
     }
   }
 }

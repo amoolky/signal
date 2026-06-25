@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
-    "build": "vite build",
+    "dev": "vite --configLoader runner --host 0.0.0.0",
+    "build": "vite build --configLoader runner",
     "parse": "node scripts/parse-program.mjs --input input_test/medical_hospital_program.xlsx --schema input_test/program_schema.json --output output/program_data.json"
   },
   "dependencies": {

@@ -4,5 +4,6 @@ dist/
 *.log
 ~$*.xlsx
 output/chrome-profile/
+output/imports/
 .agents/
 .codex/

@@ -4,14 +4,17 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseProgramWorkbook } from "./scripts/parse-program.mjs";
-import { createSignalProjectArchive, readSignalProjectArchive } from "./scripts/signal-project.mjs";
+import {
+  createSignalProjectArchive,
+  readSignalProjectArchive,
+} from "./scripts/signal-project.mjs";
 
 const rootDir = fileURLToPath(new URL(".", import.meta.url));
 const outputDir = path.resolve(rootDir, "output");
 const originalProgramPath = path.resolve(rootDir, "output/program_data.json");
 const savedProgramPath = path.resolve(rootDir, "output/program_data.saved.json");
+const parsedProgramDataDir = path.resolve(rootDir, "output/parsed");
 const currentProjectPath = path.resolve(rootDir, "output/current_project.signal");
-const uploadDir = path.resolve(rootDir, "output/imports");
 const schemaPath = path.resolve(rootDir, "input_test/program_schema.json");
 
 export default defineConfig({
@@ -31,9 +34,8 @@ function programDataApi() {
 
         try {
           if (requestUrl.pathname === "/api/program-data" && request.method === "GET") {
-            await ensureSavedCopy();
-            const data = await fs.readFile(savedProgramPath, "utf8");
-            sendJson(response, 200, data);
+            const data = await readInitialProgramData();
+            sendJson(response, 200, JSON.stringify(data));
             return;
           }
 
@@ -61,12 +63,10 @@ function programDataApi() {
           if (requestUrl.pathname === "/api/program-data/import" && request.method === "POST") {
             const { file } = await readMultipartFile(request);
             assertSpreadsheetFile(file.filename);
-            const workbookPath = path.resolve(uploadDir, sanitizeFileName(file.filename));
-            await fs.mkdir(uploadDir, { recursive: true });
-            await fs.writeFile(workbookPath, file.data);
 
             const data = parseProgramWorkbook({
-              workbookPath,
+              workbookBuffer: file.data,
+              workbookName: file.filename,
               schemaPath,
             });
             await writeSavedProgramData(data);
@@ -78,9 +78,8 @@ function programDataApi() {
             const body = await readRequestBody(request);
             const snapshot = JSON.parse(body);
             const archive = await createCurrentProjectArchive(snapshot);
-            await writeSavedProgramData(snapshot.programData);
-            await fs.mkdir(path.dirname(currentProjectPath), { recursive: true });
-            await fs.writeFile(currentProjectPath, archive);
+            await writeCurrentProjectArchive(archive);
+            await syncParsedProgramDataFilesFromArchive(archive);
             sendJson(response, 200, JSON.stringify(normalizeProjectSnapshot(snapshot)));
             return;
           }
@@ -93,6 +92,15 @@ function programDataApi() {
             }
 
             const snapshot = normalizeProjectSnapshot(readSignalProjectArchive(archive));
+            sendJson(response, 200, JSON.stringify(snapshot));
+            return;
+          }
+
+          if (requestUrl.pathname === "/api/project/archive" && request.method === "PUT") {
+            const archive = await readRequestBuffer(request);
+            const snapshot = normalizeProjectSnapshot(readSignalProjectArchive(archive));
+            await writeCurrentProjectArchive(archive);
+            await syncParsedProgramDataFilesFromArchive(archive);
             sendJson(response, 200, JSON.stringify(snapshot));
             return;
           }
@@ -115,8 +123,8 @@ function programDataApi() {
             const importedProject = readSignalProjectArchive(file.data);
             const snapshot = normalizeProjectSnapshot(importedProject);
             await writeSavedProgramData(snapshot.programData);
-            await fs.mkdir(path.dirname(currentProjectPath), { recursive: true });
-            await fs.writeFile(currentProjectPath, file.data);
+            await writeCurrentProjectArchive(file.data);
+            await syncParsedProgramDataFilesFromArchive(file.data);
             sendJson(response, 200, JSON.stringify(snapshot));
             return;
           }
@@ -152,6 +160,55 @@ async function createCurrentProjectArchive(snapshot) {
   });
 }
 
+async function writeCurrentProjectArchive(archive) {
+  await fs.mkdir(path.dirname(currentProjectPath), { recursive: true });
+  await fs.writeFile(currentProjectPath, archive);
+}
+
+async function syncParsedProgramDataFilesFromArchive(archive) {
+  const project = readSignalProjectArchive(archive, { includeEntries: true });
+  const versions = Array.isArray(project.manifest?.program_versions) ? project.manifest.program_versions : [];
+  const parsedDocuments = [];
+
+  for (const version of versions) {
+    if (!version?.path || !project.entries.has(version.path)) continue;
+
+    const data = JSON.parse(project.entries.get(version.path).toString("utf8"));
+    if (!isUsableProgramData(data)) continue;
+
+    parsedDocuments.push({ version, data });
+  }
+
+  await fs.mkdir(parsedProgramDataDir, { recursive: true });
+  for (const filePath of await listJsonFiles(parsedProgramDataDir)) {
+    await fs.unlink(filePath);
+  }
+
+  const usedFileNames = new Set();
+  for (const parsedDocument of parsedDocuments) {
+    const fileName = uniqueParsedProgramDataFileName(parsedDocument, usedFileNames);
+    const filePath = path.join(parsedProgramDataDir, fileName);
+    await fs.writeFile(filePath, `${JSON.stringify(parsedDocument.data, null, 2)}\n`, "utf8");
+  }
+}
+
+function uniqueParsedProgramDataFileName({ version, data }, usedFileNames) {
+  const sourceFileName = version.source_file_name ?? data.project?.source_files?.[0]?.name ?? data.project?.name ?? version.id;
+  const sourceBaseName = path.parse(sourceFileName).name || sourceFileName;
+  const safeBaseName = sanitizeBaseName(sourceBaseName).replace(/\s+/g, "_") || "program-data";
+  const baseName = `${safeBaseName}.program_data`;
+  let candidate = `${baseName}.json`;
+  let suffix = 2;
+
+  while (usedFileNames.has(candidate)) {
+    candidate = `${baseName}-${suffix}.json`;
+    suffix += 1;
+  }
+
+  usedFileNames.add(candidate);
+  return candidate;
+}
+
 async function readOptionalFile(filePath) {
   try {
     return await fs.readFile(filePath);
@@ -174,7 +231,12 @@ function normalizeProjectSnapshot(snapshot) {
         advancedSortConfig: snapshot.tableState?.program?.advancedSortConfig ?? null,
       },
     },
+    workspaceState: normalizeWorkspaceState(snapshot.workspaceState),
   };
+}
+
+function normalizeWorkspaceState(workspaceState) {
+  return workspaceState && typeof workspaceState === "object" ? workspaceState : {};
 }
 
 async function listProgramDataFiles() {
@@ -191,52 +253,63 @@ async function listProgramDataFiles() {
     addFile(outputFile);
   }
 
-  const archiveBuffer = await readOptionalFile(currentProjectPath);
-  if (archiveBuffer) {
-    const project = readSignalProjectArchive(archiveBuffer, { includeEntries: true });
-    for (const version of project.manifest?.program_versions ?? []) {
-      if (!version?.id || !version?.path || !project.entries.has(version.path)) continue;
-      const data = JSON.parse(project.entries.get(version.path).toString("utf8"));
-      if (!isProgramData(data)) continue;
-
-      addFile({
-        id: `project:${version.id}`,
-        label: version.label || getProgramDataTitle(data, version.path),
-        path: version.path,
-        source: "project",
-        createdAt: version.created_at ?? null,
-        schemaVersion: data.schema_version ?? null,
-      });
-    }
+  for (const projectFile of await listProjectProgramDataFiles()) {
+    addFile(projectFile);
   }
 
   return files;
 }
 
 async function listOutputProgramDataFiles() {
-  let entries = [];
-  try {
-    entries = await fs.readdir(outputDir, { withFileTypes: true });
-  } catch (error) {
-    if (error.code === "ENOENT") return [];
-    throw error;
-  }
-
   const files = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== ".json") continue;
+  for (const filePath of await listJsonFiles(outputDir)) {
+    let data = null;
+    try {
+      data = await readOptionalJsonFile(filePath);
+    } catch {
+      continue;
+    }
 
-    const filePath = path.join(outputDir, entry.name);
-    const data = await readOptionalJsonFile(filePath);
-    if (!isProgramData(data)) continue;
+    if (!isUsableProgramData(data)) continue;
+
+    const outputRelativePath = toOutputRelativePath(filePath);
 
     files.push({
-      id: `output:${entry.name}`,
-      label: getProgramDataTitle(data, entry.name),
+      id: `output:${outputRelativePath}`,
+      label: getProgramDataTitle(data, path.basename(filePath)),
       path: toProjectRelativePath(filePath),
       source: "output",
       createdAt: data.project?.updated_at ?? data.project?.created_at ?? null,
+      rowCount: data.program_items.length,
       schemaVersion: data.schema_version ?? null,
+    });
+  }
+
+  return files;
+}
+
+async function listProjectProgramDataFiles() {
+  const archiveBuffer = await readOptionalFile(currentProjectPath);
+  if (!archiveBuffer) return [];
+
+  const project = readSignalProjectArchive(archiveBuffer, { includeEntries: true });
+  const versions = Array.isArray(project.manifest?.program_versions) ? project.manifest.program_versions : [];
+  const files = [];
+
+  for (const version of versions) {
+    if (!version?.id || !version.path || !project.entries.has(version.path)) continue;
+
+    const data = JSON.parse(project.entries.get(version.path).toString("utf8"));
+    if (!isProgramData(data)) continue;
+
+    files.push({
+      id: `project:${version.id}`,
+      label: version.label || getProgramDataTitle(data, path.basename(version.path)),
+      path: version.path,
+      source: "project",
+      createdAt: version.created_at ?? data.project?.updated_at ?? data.project?.created_at ?? null,
+      rowCount: data.program_items.length,
+      schemaVersion: data.schema_version ?? version.schema_version ?? null,
     });
   }
 
@@ -247,13 +320,16 @@ async function readProgramDataFileById(id) {
   if (!id) throw new Error("Program data file id is required.");
 
   if (id.startsWith("output:")) {
-    const fileName = id.slice("output:".length);
-    if (path.basename(fileName) !== fileName || path.extname(fileName).toLowerCase() !== ".json") {
+    const outputRelativePath = normalizeOutputRelativePath(id.slice("output:".length));
+    if (!outputRelativePath || path.extname(outputRelativePath).toLowerCase() !== ".json") {
       throw new Error("Invalid output program data file id.");
     }
 
-    const data = await readOptionalJsonFile(path.join(outputDir, fileName));
-    if (!isProgramData(data)) throw new Error("The selected output file is not parsed program data.");
+    const filePath = path.resolve(outputDir, ...outputRelativePath.split("/"));
+    if (!isPathWithinDirectory(filePath, outputDir)) throw new Error("Invalid output program data file id.");
+
+    const data = await readOptionalJsonFile(filePath);
+    if (!isUsableProgramData(data)) throw new Error("The selected output file is not parsed program data.");
     return data;
   }
 
@@ -282,25 +358,123 @@ async function readOptionalJsonFile(filePath) {
   return JSON.parse(buffer.toString("utf8"));
 }
 
+async function readInitialProgramData() {
+  return (
+    (await readOptionalJsonFile(savedProgramPath)) ??
+    (await readOptionalJsonFile(originalProgramPath)) ??
+    createEmptyProgramData()
+  );
+}
+
+function createEmptyProgramData(projectName = "Untitled Project") {
+  const now = new Date().toISOString();
+  const name = String(projectName ?? "").trim() || "Untitled Project";
+
+  return {
+    schema_version: "1.0.0",
+    project: {
+      id: slugify(name),
+      name,
+      created_at: now,
+      updated_at: now,
+      source_files: [],
+    },
+    units: {
+      area: "sf",
+      length: "ft",
+      coordinate: "model_units",
+    },
+    calculation_rules: {
+      program_item_total_nsf: "quantity * nsf_per_unit",
+      department_net_nsf: "sum(program_item_total_nsf for program_items in department)",
+      department_gross_dgsf: "department_net_nsf * grossing_factor",
+      rounding: {
+        area_decimals: 2,
+        factor_decimals: 2,
+      },
+    },
+    floors: [],
+    departments: [],
+    program_groups: [],
+    program_items: [],
+    drawings: [],
+    model_elements: [],
+    model_links: [],
+    derived_totals_cache: {
+      project_net_nsf: 0,
+      project_gross_dgsf: 0,
+      department_totals: [],
+    },
+    validation_issues: [],
+    extensions: {
+      created_in: "SIGNAL",
+    },
+  };
+}
+
 function isProgramData(data) {
   return Boolean(data && typeof data === "object" && data.project && Array.isArray(data.program_items));
+}
+
+function isUsableProgramData(data) {
+  return isProgramData(data) && data.program_items.length > 0;
 }
 
 function getProgramDataTitle(data, fallbackLabel) {
   return String(data?.project?.name ?? fallbackLabel ?? "Untitled Project").trim() || "Untitled Project";
 }
 
+function slugify(value) {
+  const slug = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[+/]/g, " ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "item";
+}
+
 function toProjectRelativePath(filePath) {
   return path.relative(rootDir, filePath).replace(/\\/g, "/");
 }
 
-async function ensureSavedCopy() {
+function toOutputRelativePath(filePath) {
+  return path.relative(outputDir, filePath).replace(/\\/g, "/");
+}
+
+function normalizeOutputRelativePath(value) {
+  const normalizedPath = String(value ?? "").replace(/\\/g, "/").replace(/^\/+/, "");
+  if (path.isAbsolute(normalizedPath) || normalizedPath.includes(":")) return "";
+  if (!normalizedPath || normalizedPath.split("/").some((part) => part === ".." || part === "")) return "";
+  return normalizedPath;
+}
+
+function isPathWithinDirectory(filePath, directoryPath) {
+  const relativePath = path.relative(directoryPath, filePath);
+  return Boolean(relativePath) && !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
+}
+
+async function listJsonFiles(directoryPath) {
+  let entries = [];
   try {
-    await fs.access(savedProgramPath);
-  } catch {
-    await fs.mkdir(path.dirname(savedProgramPath), { recursive: true });
-    await fs.copyFile(originalProgramPath, savedProgramPath);
+    entries = await fs.readdir(directoryPath, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
   }
+
+  const files = [];
+  for (const entry of entries) {
+    const entryPath = path.join(directoryPath, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await listJsonFiles(entryPath)));
+    } else if (entry.isFile() && path.extname(entry.name).toLowerCase() === ".json") {
+      files.push(entryPath);
+    }
+  }
+
+  return files.sort((a, b) => toProjectRelativePath(a).localeCompare(toProjectRelativePath(b)));
 }
 
 function readRequestBody(request) {
@@ -385,11 +559,6 @@ function assertSignalFile(fileName) {
   if (path.extname(fileName).toLowerCase() !== ".signal") {
     throw new Error("Please import a .signal project file.");
   }
-}
-
-function sanitizeFileName(fileName) {
-  const baseName = path.basename(fileName).replace(/[^\w .()-]+/g, "_").trim();
-  return `${Date.now()}-${baseName || "import.xlsx"}`;
 }
 
 function sanitizeBaseName(value) {

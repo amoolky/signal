@@ -5,19 +5,66 @@ const PROGRAM_DATA_FILE_ENDPOINT = "/api/program-data/file";
 const PROGRAM_DATA_FILES_ENDPOINT = "/api/program-data/files";
 const PROGRAM_IMPORT_ENDPOINT = "/api/program-data/import";
 const PROJECT_ENDPOINT = "/api/project";
+const PROJECT_ARCHIVE_ENDPOINT = "/api/project/archive";
 const PROJECT_EXPORT_ENDPOINT = "/api/project/export";
 const PROJECT_IMPORT_ENDPOINT = "/api/project/import";
-
-const columns = [
-  { key: "department", label: "Department", className: "col-department" },
-  { key: "programGroup", label: "Program Group", className: "col-group" },
-  { key: "program", label: "Program", className: "col-program" },
+const NON_EDITABLE_TABLE_COLUMN_KEYS = new Set(["totalNsf"]);
+const TABLE_ROW_NUMBER_COLUMN_WIDTH = 34;
+const TABLE_HEADER_HEIGHT = 30;
+const DEFAULT_TABLE_ROW_HEIGHT = 27;
+const TABLE_GRID_LINE_WIDTH = 1;
+const DEFAULT_TABLE_COLUMN_WIDTH = 110;
+const MIN_TABLE_ROW_HEIGHT = 20;
+const MIN_TABLE_COLUMN_WIDTH = 56;
+const BLANK_SPREADSHEET_ROW_COUNT = 50;
+const BLANK_SPREADSHEET_COLUMN_COUNT = 26;
+const TABLE_VIRTUAL_OVERSCAN_ROWS = 8;
+const MAX_TABLE_HISTORY_ENTRIES = 100;
+const IMPORTED_SPREADSHEET_COLUMN_KEYS = ["program", "quantity", "nsfPerUnit", "totalNsf", "floor", "comments"];
+const PRIMARY_SPREADSHEET_COLUMN_KEYS = ["department", "programGroup", "program"];
+const LEVEL_OF_DETAIL_OPTIONS = [
+  { value: "functionalGroup", label: "Functional Group" },
+  { value: "departmentFunction", label: "Department Function" },
+  { value: "department", label: "Department" },
+  { value: "functionalArea", label: "Functional Area" },
+  { value: "room", label: "Room" },
+];
+const SPREADSHEET_VIEW_OPTIONS = [
+  { value: "spreadsheet", label: "Spreadsheet" },
+  { value: "hierarchical", label: "Hierarchical" },
+];
+const SPREADSHEET_HIERARCHY_LEVELS = [
+  { value: "department", label: "Department" },
+  { value: "programGroup", label: "Functional Area" },
+];
+const HIERARCHICAL_SPREADSHEET_COLUMNS = [
+  { key: "program", label: "Program/Room", className: "col-program" },
   { key: "quantity", label: "Quantity", className: "col-number" },
   { key: "nsfPerUnit", label: "NSF/Room", className: "col-number" },
   { key: "totalNsf", label: "Total NSF", className: "col-total" },
   { key: "floor", label: "Floor", className: "col-floor" },
   { key: "comments", label: "Comments", className: "col-comments" },
 ];
+
+const columns = [
+  { key: "department", label: "Department", className: "col-department", width: 190 },
+  { key: "programGroup", label: "Functional Area", className: "col-group", width: 170 },
+  { key: "program", label: "Program", className: "col-program", width: 250 },
+  { key: "quantity", label: "Quantity", className: "col-number", width: 110 },
+  { key: "nsfPerUnit", label: "NSF/Room", className: "col-number", width: 110 },
+  { key: "totalNsf", label: "Total NSF", className: "col-total", width: 110 },
+  { key: "floor", label: "Floor", className: "col-floor", width: 84 },
+  { key: "comments", label: "Comments", className: "col-comments", width: 300 },
+];
+
+const blankSpreadsheetColumns = Array.from({ length: BLANK_SPREADSHEET_COLUMN_COUNT }, (_, index) => ({
+  key: `blankColumn${index + 1}`,
+  label: "",
+  className: "col-blank",
+  width: DEFAULT_TABLE_COLUMN_WIDTH,
+}));
+
+const allTableColumns = [...columns, ...blankSpreadsheetColumns];
 
 const FORMAT_SHORTCUTS = {
   b: "bold",
@@ -26,15 +73,56 @@ const FORMAT_SHORTCUTS = {
 };
 
 const DEFAULT_TABLE_DOCUMENT_ID = "default-table-document";
+const TABLE_VIEW_SPREADSHEET = "spreadsheet";
+const TABLE_VIEW_HIERARCHICAL = "hierarchical";
+const SAVE_BANNER_DURATION_MS = 2500;
+const DIAGRAM_VALUES_EXTENSION_KEY = "diagram_values";
+const DIAGRAM_SETTINGS_EXTENSION_KEY = "diagram_settings";
+const DIAGRAM_STACKING_SETTINGS_KEY = "stacking";
 
 function createDefaultStackingSettings() {
   return {
     defaultFloorToFloorFeet: "12",
     defaultFloorToFloorInches: "0",
+    defaultWidth: "100",
     levelOfDetail: "functionalGroup",
     textSize: "12",
     grossSquareFootage: false,
     netSquareFootage: false,
+  };
+}
+
+function createDefaultSpreadsheetSettings() {
+  return {
+    calculateSubtotals: "functionalGroup",
+    view: "spreadsheet",
+    distributeIdenticalRooms: false,
+  };
+}
+
+function normalizeSpreadsheetSettings(settings) {
+  const defaults = createDefaultSpreadsheetSettings();
+  const view = SPREADSHEET_VIEW_OPTIONS.some((option) => option.value === settings?.view)
+    ? settings.view
+    : defaults.view;
+  const calculateSubtotals = LEVEL_OF_DETAIL_OPTIONS.some((option) => option.value === settings?.calculateSubtotals)
+    ? settings.calculateSubtotals
+    : defaults.calculateSubtotals;
+
+  return {
+    ...defaults,
+    view,
+    calculateSubtotals,
+    distributeIdenticalRooms: Boolean(settings?.distributeIdenticalRooms),
+  };
+}
+
+function createDefaultDiagramState() {
+  return {
+    activeView: "stacking",
+    stackingSettings: createDefaultStackingSettings(),
+    sourceDocumentId: "",
+    stackingDiagram: null,
   };
 }
 
@@ -44,7 +132,19 @@ function createDefaultTablePaneState(documentId = DEFAULT_TABLE_DOCUMENT_ID) {
     sortConfig: null,
     advancedSortConfig: null,
     selectedCells: [],
+    selectionRanges: [],
     selectionAnchor: null,
+  };
+}
+
+function createDefaultTableColumnWidths() {
+  return Object.fromEntries(allTableColumns.map((column) => [column.key, column.width]));
+}
+
+function createEmptyTableHistory() {
+  return {
+    past: [],
+    future: [],
   };
 }
 
@@ -54,15 +154,71 @@ function createTableDocumentFromData(data) {
     draftProjectName: getProgramTitle(data),
     draftRows: createRows(data),
     cellStyles: createCellStyles(data),
+    isDirty: false,
+  };
+}
+
+function distributeTableDocumentForIdenticalRooms(tableDocument) {
+  if (!tableDocument?.programData) return tableDocument;
+
+  const baseDocument = createTableDocumentFromData(tableDocument.programData);
+  const draftRowsForDistribution = Array.isArray(tableDocument.draftRows) ? tableDocument.draftRows : baseDocument.draftRows;
+  if (!hasDistributableProgramRows(draftRowsForDistribution)) return tableDocument;
+
+  const cellStylesForDistribution = isPlainObject(tableDocument.cellStyles) ? tableDocument.cellStyles : baseDocument.cellStyles;
+  const draftProjectNameForDistribution = typeof tableDocument.draftProjectName === "string"
+    ? tableDocument.draftProjectName
+    : baseDocument.draftProjectName;
+  const distributedData = mergeRowsIntoProgramData(
+    tableDocument.programData,
+    draftRowsForDistribution,
+    cellStylesForDistribution,
+    draftProjectNameForDistribution,
+    {
+      distributeIdenticalRooms: true,
+    },
+  );
+
+  return {
+    ...createTableDocumentFromData(distributedData),
+    isDirty: true,
+  };
+}
+
+function consolidateTableDocumentForIdenticalRooms(tableDocument) {
+  if (!tableDocument?.programData) return tableDocument;
+
+  const baseDocument = createTableDocumentFromData(tableDocument.programData);
+  const draftRowsForConsolidation = Array.isArray(tableDocument.draftRows) ? tableDocument.draftRows : baseDocument.draftRows;
+  const cellStylesForConsolidation = isPlainObject(tableDocument.cellStyles) ? tableDocument.cellStyles : baseDocument.cellStyles;
+  const draftProjectNameForConsolidation = typeof tableDocument.draftProjectName === "string"
+    ? tableDocument.draftProjectName
+    : baseDocument.draftProjectName;
+  const mergedData = mergeRowsIntoProgramData(
+    tableDocument.programData,
+    draftRowsForConsolidation,
+    cellStylesForConsolidation,
+    draftProjectNameForConsolidation,
+  );
+  const didConsolidate = consolidateIdenticalProgramRooms(mergedData);
+  if (!didConsolidate) return tableDocument;
+
+  return {
+    ...createTableDocumentFromData(mergedData),
+    isDirty: true,
   };
 }
 
 export default function App() {
   const spreadsheetImportInputRef = useRef(null);
   const projectImportInputRef = useRef(null);
+  const editingCellInputRef = useRef(null);
   const nextWorkspacePaneId = useRef(1);
+  const nextStackingConflictId = useRef(1);
   const workspaceDisplayRef = useRef(null);
   const pendingSpreadsheetImportPaneIdRef = useRef(null);
+  const tableViewportMetricsRef = useRef({});
+  const saveBannerTimeoutRef = useRef(null);
   const [isStartDialogOpen, setIsStartDialogOpen] = useState(true);
   const [isTableOpen, setIsTableOpen] = useState(false);
   const [isDiagramsOpen, setIsDiagramsOpen] = useState(false);
@@ -71,6 +227,19 @@ export default function App() {
   const [workspaceSlots, setWorkspaceSlots] = useState([]);
   const [workspacePaneWidths, setWorkspacePaneWidths] = useState([]);
   const [paneResizeState, setPaneResizeState] = useState(null);
+  const [tableColumnWidths, setTableColumnWidths] = useState(createDefaultTableColumnWidths);
+  const [tableRowHeights, setTableRowHeights] = useState({});
+  const [blankSpreadsheetCellValues, setBlankSpreadsheetCellValues] = useState({});
+  const [tableGridResizeState, setTableGridResizeState] = useState(null);
+  const [tableSelectionDragState, setTableSelectionDragState] = useState(null);
+  const [tableViewportMetrics, setTableViewportMetrics] = useState({});
+  const [hierarchyNodeOpenStates, setHierarchyNodeOpenStates] = useState({});
+  const [tableHistory, setTableHistory] = useState(createEmptyTableHistory);
+  const [stackingConflicts, setStackingConflicts] = useState([]);
+  const [activeConflictCellKey, setActiveConflictCellKey] = useState(null);
+  const [conflictMenu, setConflictMenu] = useState(null);
+  const [footerConflictMenuPaneId, setFooterConflictMenuPaneId] = useState(null);
+  const [activeWorkspacePane, setActiveWorkspacePane] = useState(null);
   const [activeTablePaneId, setActiveTablePaneId] = useState(null);
   const [activeDiagramView, setActiveDiagramView] = useState("stacking");
   const [stackingSettings, setStackingSettings] = useState(createDefaultStackingSettings);
@@ -80,12 +249,16 @@ export default function App() {
   const [draftRows, setDraftRows] = useState([]);
   const [cellStyles, setCellStyles] = useState({});
   const [selectedTableCells, setSelectedTableCells] = useState([]);
+  const [selectedTableRanges, setSelectedTableRanges] = useState([]);
   const [tableSelectionAnchor, setTableSelectionAnchor] = useState(null);
   const [sortConfig, setSortConfig] = useState(null);
   const [advancedSortConfig, setAdvancedSortConfig] = useState(null);
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
   const [columnMenu, setColumnMenu] = useState(null);
   const [openSpreadsheetTitlePaneId, setOpenSpreadsheetTitlePaneId] = useState(null);
+  const [spreadsheetSettingsPaneId, setSpreadsheetSettingsPaneId] = useState(null);
+  const [spreadsheetSettings, setSpreadsheetSettings] = useState(createDefaultSpreadsheetSettings);
+  const [draftSpreadsheetSettings, setDraftSpreadsheetSettings] = useState(createDefaultSpreadsheetSettings);
   const [isAdvancedSortOpen, setIsAdvancedSortOpen] = useState(false);
   const [advancedSortPaneId, setAdvancedSortPaneId] = useState(null);
   const [advancedDraftRules, setAdvancedDraftRules] = useState(createDefaultAdvancedSortRules);
@@ -103,10 +276,13 @@ export default function App() {
   const [pendingTableClosePaneId, setPendingTableClosePaneId] = useState(null);
   const [availableProgramDataFiles, setAvailableProgramDataFiles] = useState([]);
   const [loadingProgramDataFileId, setLoadingProgramDataFileId] = useState(null);
+  const [editingTableCell, setEditingTableCell] = useState(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
+  const [saveBannerKey, setSaveBannerKey] = useState(0);
 
-  const totals = useMemo(() => summarizeRows(draftRows), [draftRows]);
+  tableViewportMetricsRef.current = tableViewportMetrics;
+
   const sortedRows = useMemo(() => sortRows(draftRows, sortConfig, advancedSortConfig), [draftRows, sortConfig, advancedSortConfig]);
   const advancedBaseRules = useMemo(() => {
     const baseAdvancedSortConfig = advancedSortPaneId
@@ -119,28 +295,8 @@ export default function App() {
     [advancedDraftRules, advancedBaseRules],
   );
   const selectedRuleKeySet = useMemo(() => new Set(selectedRuleKeys), [selectedRuleKeys]);
-  const selectedTableCellSet = useMemo(() => new Set(selectedTableCells), [selectedTableCells]);
   const visibleRowIndexById = useMemo(() => new Map(sortedRows.map((row, index) => [row.id, index])), [sortedRows]);
-  const columnIndexByKey = useMemo(() => new Map(columns.map((column, index) => [column.key, index])), []);
-  const savedRowsSignature = useMemo(
-    () => (programData ? JSON.stringify(createRows(programData)) : ""),
-    [programData],
-  );
-  const draftRowsSignature = useMemo(() => JSON.stringify(draftRows), [draftRows]);
-  const savedCellStylesSignature = useMemo(
-    () => (programData ? serializeCellStyles(createCellStyles(programData)) : ""),
-    [programData],
-  );
-  const cellStylesSignature = useMemo(() => serializeCellStyles(cellStyles), [cellStyles]);
-  const savedProjectName = programData ? getProgramTitle(programData) : "";
-  const hasUnsavedEdits = Boolean(
-    programData &&
-      (
-        draftRowsSignature !== savedRowsSignature ||
-        cellStylesSignature !== savedCellStylesSignature ||
-        normalizeProjectName(draftProjectName) !== savedProjectName
-      ),
-  );
+  const hasUnsavedEdits = Boolean(tableDocuments[DEFAULT_TABLE_DOCUMENT_ID]?.isDirty);
 
   useEffect(() => {
     if (!paneResizeState) return undefined;
@@ -180,6 +336,96 @@ export default function App() {
       window.removeEventListener("mouseup", onMouseUp);
     };
   }, [paneResizeState]);
+
+  useEffect(() => {
+    if (!tableGridResizeState) return undefined;
+
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = tableGridResizeState.type === "column" ? "col-resize" : "row-resize";
+    document.body.style.userSelect = "none";
+
+    const onMouseMove = (event) => {
+      if (tableGridResizeState.type === "column") {
+        const nextWidth = Math.max(
+          MIN_TABLE_COLUMN_WIDTH,
+          tableGridResizeState.startWidth + event.clientX - tableGridResizeState.startClientX,
+        );
+        setTableColumnWidths((widths) => ({
+          ...widths,
+          [tableGridResizeState.columnKey]: nextWidth,
+        }));
+        return;
+      }
+
+      const nextHeight = Math.max(
+        MIN_TABLE_ROW_HEIGHT,
+        tableGridResizeState.startHeight + event.clientY - tableGridResizeState.startClientY,
+      );
+      setTableRowHeights((heights) => ({
+        ...heights,
+        [tableGridResizeState.rowId]: nextHeight,
+      }));
+    };
+
+    const onMouseUp = (event) => {
+      if (tableGridResizeState.type === "column") {
+        const nextWidth = Math.max(
+          MIN_TABLE_COLUMN_WIDTH,
+          tableGridResizeState.startWidth + event.clientX - tableGridResizeState.startClientX,
+        );
+        if (nextWidth !== tableGridResizeState.startWidth) {
+          pushTableHistorySnapshot(tableGridResizeState.historySnapshot);
+          setTableColumnWidths((widths) => ({
+            ...widths,
+            [tableGridResizeState.columnKey]: nextWidth,
+          }));
+        }
+      } else {
+        const nextHeight = Math.max(
+          MIN_TABLE_ROW_HEIGHT,
+          tableGridResizeState.startHeight + event.clientY - tableGridResizeState.startClientY,
+        );
+        if (nextHeight !== tableGridResizeState.startHeight) {
+          pushTableHistorySnapshot(tableGridResizeState.historySnapshot);
+          setTableRowHeights((heights) => ({
+            ...heights,
+            [tableGridResizeState.rowId]: nextHeight,
+          }));
+        }
+      }
+
+      setTableGridResizeState(null);
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, [tableGridResizeState]);
+
+  useEffect(() => {
+    if (!tableSelectionDragState) return undefined;
+
+    const onMouseUp = () => setTableSelectionDragState(null);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => window.removeEventListener("mouseup", onMouseUp);
+  }, [tableSelectionDragState]);
+
+  useEffect(() => {
+    const refreshTableViewportMetrics = () => {
+      document.querySelectorAll(".table-shell[data-table-pane-id]").forEach((element) => {
+        updateTableViewportMetrics(element.dataset.tablePaneId, element, getTableViewKeyFromElement(element));
+      });
+    };
+
+    window.addEventListener("resize", refreshTableViewportMetrics);
+    return () => window.removeEventListener("resize", refreshTableViewportMetrics);
+  }, []);
 
   useEffect(() => {
     if (workspaceSlots.length !== workspacePaneWidths.length) {
@@ -224,6 +470,50 @@ export default function App() {
   }, [openSpreadsheetTitlePaneId]);
 
   useEffect(() => {
+    if (!spreadsheetSettingsPaneId) return undefined;
+
+    const closeSpreadsheetSettingsOnKey = (event) => {
+      if (event.key === "Escape") closeSpreadsheetSettings();
+    };
+
+    window.addEventListener("keydown", closeSpreadsheetSettingsOnKey);
+    return () => window.removeEventListener("keydown", closeSpreadsheetSettingsOnKey);
+  }, [spreadsheetSettings, spreadsheetSettingsPaneId]);
+
+  useEffect(() => {
+    if (!conflictMenu) return undefined;
+
+    const closeConflictMenu = () => setConflictMenu(null);
+    const closeConflictMenuOnKey = (event) => {
+      if (event.key === "Escape") setConflictMenu(null);
+    };
+
+    window.addEventListener("mousedown", closeConflictMenu);
+    window.addEventListener("keydown", closeConflictMenuOnKey);
+    return () => {
+      window.removeEventListener("mousedown", closeConflictMenu);
+      window.removeEventListener("keydown", closeConflictMenuOnKey);
+    };
+  }, [conflictMenu]);
+
+  useEffect(() => {
+    if (!footerConflictMenuPaneId) return undefined;
+
+    const closeFooterConflictMenu = () => setFooterConflictMenuPaneId(null);
+    const closeFooterConflictMenuOnKey = (event) => {
+      if (event.key === "Escape") setFooterConflictMenuPaneId(null);
+    };
+
+    window.addEventListener("mousedown", closeFooterConflictMenu);
+    window.addEventListener("keydown", closeFooterConflictMenuOnKey);
+    return () => {
+      window.removeEventListener("mousedown", closeFooterConflictMenu);
+      window.removeEventListener("keydown", closeFooterConflictMenuOnKey);
+    };
+  }, [footerConflictMenuPaneId]);
+
+
+  useEffect(() => {
     if (!isProjectMenuOpen) return undefined;
 
     const closeProjectMenu = () => setIsProjectMenuOpen(false);
@@ -248,10 +538,13 @@ export default function App() {
       saveProjectToBackend();
     };
 
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [
+    activeDiagramView,
+    activeTablePaneId,
     advancedSortConfig,
+    blankSpreadsheetCellValues,
     cellStyles,
     draftProjectName,
     draftRows,
@@ -261,8 +554,23 @@ export default function App() {
     isTableOpen,
     programData,
     sortConfig,
+    spreadsheetSettings,
+    stackingConflicts,
+    stackingSettings,
+    tableColumnWidths,
     tableDocuments,
+    tableRowHeights,
+    workspacePaneWidths,
+    workspaceSlots,
   ]);
+
+  useEffect(() => {
+    return () => {
+      if (saveBannerTimeoutRef.current) {
+        window.clearTimeout(saveBannerTimeoutRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!isAdvancedSortOpen) return undefined;
@@ -292,24 +600,67 @@ export default function App() {
   }, [isAdvancedSortOpen, selectedRuleKeys]);
 
   useEffect(() => {
+    if (!editingTableCell) return;
+
+    const input = editingCellInputRef.current;
+    if (!input) return;
+
+    input.focus({ preventScroll: true });
+    const caretPosition = input.value.length;
+    input.setSelectionRange(caretPosition, caretPosition);
+  }, [editingTableCell]);
+
+  useEffect(() => {
     if (!isTableOpen) return undefined;
 
     const onKeyDown = (event) => {
-      if (isAdvancedSortOpen || isAdvancedCancelConfirmOpen || isExitConfirmOpen) return;
+      if (event.defaultPrevented || !isTablePanelActiveForKeyboard()) return;
+      if (spreadsheetSettingsPaneId || isAdvancedSortOpen || isAdvancedCancelConfirmOpen || isExitConfirmOpen) return;
+      if (spreadsheetSettings.view === TABLE_VIEW_HIERARCHICAL) return;
+
+      if (editingTableCell) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          cancelTableCellEdit();
+          return;
+        }
+
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commitTableCellEditAndMove(event.shiftKey ? -1 : 1, 0);
+          return;
+        }
+
+        if (event.key === "Tab") {
+          event.preventDefault();
+          commitTableCellEditAndMove(0, event.shiftKey ? -1 : 1);
+        }
+        return;
+      }
+
       const activeSelectedCells = getActiveTableSelectedCells();
 
       if (event.key === "Escape" && activeSelectedCells.length > 0) {
         event.preventDefault();
-        clearActiveTableSelection();
         blurActiveTableInput();
         return;
       }
 
-      const formatKey = FORMAT_SHORTCUTS[event.key.toLowerCase()];
-      if (!formatKey || !(event.ctrlKey || event.metaKey) || event.altKey || activeSelectedCells.length === 0) return;
+      if (isEventFromTextEditingTarget(event)) return;
 
-      event.preventDefault();
-      applyTableCellFormat(formatKey);
+      const formatKey = FORMAT_SHORTCUTS[event.key.toLowerCase()];
+      if (formatKey && (event.ctrlKey || event.metaKey) && !event.altKey && activeSelectedCells.length > 0) {
+        event.preventDefault();
+        applyTableCellFormat(formatKey);
+        return;
+      }
+
+      if (handleActiveTableShortcut(event, activeSelectedCells)) return;
+
+      if (shouldStartSelectedTableCellEdit(event, activeSelectedCells)) {
+        event.preventDefault();
+        startSelectedTableCellEdit(event.key);
+      }
     };
 
     window.addEventListener("keydown", onKeyDown);
@@ -319,21 +670,48 @@ export default function App() {
     isAdvancedSortOpen,
     isExitConfirmOpen,
     isTableOpen,
+    spreadsheetSettings,
+    spreadsheetSettingsPaneId,
+    editingTableCell,
     selectedTableCells,
+    activeWorkspacePane,
     activeTablePaneId,
+    columnMenu,
+    isProjectMenuOpen,
+    openSpreadsheetTitlePaneId,
+    sortConfig,
+    advancedSortConfig,
+    tableSelectionAnchor,
     tableDocuments,
+    blankSpreadsheetCellValues,
+    tableColumnWidths,
+    tableHistory,
+    tableRowHeights,
     workspaceSlots,
   ]);
 
-  function applyProgramData(data) {
+  function createTableDocumentForCurrentSpreadsheetSettings(data) {
     const nextDocument = createTableDocumentFromData(data);
-    setProgramData(data);
+    return spreadsheetSettings.distributeIdenticalRooms
+      ? distributeTableDocumentForIdenticalRooms(nextDocument)
+      : nextDocument;
+  }
+
+  function applyProgramData(data) {
+    const nextDocument = createTableDocumentForCurrentSpreadsheetSettings(data);
+    setProgramData(nextDocument.programData);
+    setBlankSpreadsheetCellValues({});
     setTableDocuments({
       [DEFAULT_TABLE_DOCUMENT_ID]: nextDocument,
     });
     setDraftProjectName(nextDocument.draftProjectName);
     setDraftRows(nextDocument.draftRows);
     setCellStyles(nextDocument.cellStyles);
+    setTableHistory(createEmptyTableHistory());
+    setStackingConflicts([]);
+    setActiveConflictCellKey(null);
+    setConflictMenu(null);
+    setFooterConflictMenuPaneId(null);
     clearTableSelection();
   }
 
@@ -349,9 +727,42 @@ export default function App() {
     return tableDocuments[documentId] ?? getFallbackTableDocument(documentId);
   }
 
-  function setTableDocumentFromData(documentId, data) {
+  function setTableDocumentFromData(documentId, data, options = {}) {
     const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
-    const nextDocument = createTableDocumentFromData(data);
+    const nextDocument = createTableDocumentForCurrentSpreadsheetSettings(data);
+    const documentForState = options.markDirty ? { ...nextDocument, isDirty: true } : nextDocument;
+
+    setTableDocuments((documents) => ({
+      ...documents,
+      [normalizedDocumentId]: documentForState,
+    }));
+
+    if (normalizedDocumentId === DEFAULT_TABLE_DOCUMENT_ID) {
+      setProgramData(documentForState.programData);
+      setDraftProjectName(documentForState.draftProjectName);
+      setDraftRows(documentForState.draftRows);
+      setCellStyles(documentForState.cellStyles);
+    }
+
+    setStackingConflicts((conflicts) =>
+      options.rebuildStackingConflicts
+        ? mergeStackingConflictsForDocument(conflicts, normalizedDocumentId, documentForState)
+        : conflicts.filter((conflict) => conflict.documentId !== normalizedDocumentId),
+    );
+    setActiveConflictCellKey(null);
+    setConflictMenu(null);
+    setFooterConflictMenuPaneId(null);
+    setTableHistory(createEmptyTableHistory());
+  }
+
+  function updateTableDocumentProgramData(documentId, nextProgramData, options = {}) {
+    const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
+    const currentDocument = getTableDocument(normalizedDocumentId);
+    const nextDocument = {
+      ...currentDocument,
+      programData: nextProgramData,
+      isDirty: options.markDirty ? true : currentDocument.isDirty,
+    };
 
     setTableDocuments((documents) => ({
       ...documents,
@@ -359,24 +770,44 @@ export default function App() {
     }));
 
     if (normalizedDocumentId === DEFAULT_TABLE_DOCUMENT_ID) {
-      setProgramData(data);
-      setDraftProjectName(nextDocument.draftProjectName);
-      setDraftRows(nextDocument.draftRows);
-      setCellStyles(nextDocument.cellStyles);
+      setProgramData(nextProgramData);
     }
+
+    if (options.rebuildStackingConflicts) {
+      setStackingConflicts((conflicts) => mergeStackingConflictsForDocument(conflicts, normalizedDocumentId, nextDocument));
+    }
+
+    return nextDocument;
   }
 
-  function updateTableDocument(documentId, updater) {
+  function updateTableDocument(documentId, updater, { markDirty = true } = {}) {
     const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
     const fallbackDocument = getTableDocument(normalizedDocumentId);
 
     setTableDocuments((documents) => {
       const currentDocument = documents[normalizedDocumentId] ?? fallbackDocument;
+      const nextDocument = updater(currentDocument);
       return {
         ...documents,
-        [normalizedDocumentId]: updater(currentDocument),
+        [normalizedDocumentId]: markDirty ? { ...nextDocument, isDirty: true } : nextDocument,
       };
     });
+  }
+
+  function updateSpreadsheetTitle(documentId, value) {
+    const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
+    const nextTitle = String(value ?? "");
+    const currentDocument = getTableDocument(normalizedDocumentId);
+    if (currentDocument.draftProjectName === nextTitle) return;
+
+    updateTableDocument(normalizedDocumentId, (tableDocument) => ({
+      ...tableDocument,
+      draftProjectName: nextTitle,
+    }));
+
+    if (normalizedDocumentId === DEFAULT_TABLE_DOCUMENT_ID) {
+      setDraftProjectName(nextTitle);
+    }
   }
 
   function getTablePaneDocumentId(paneId) {
@@ -385,10 +816,6 @@ export default function App() {
 
   function getActiveTableDocumentId() {
     return activeTablePaneId ? getTablePaneDocumentId(activeTablePaneId) : DEFAULT_TABLE_DOCUMENT_ID;
-  }
-
-  function createImportedTableDocumentId(file) {
-    return `spreadsheet:${file.name}:${file.size}:${file.lastModified}`;
   }
 
   async function refreshAvailableProgramDataFiles() {
@@ -414,7 +841,8 @@ export default function App() {
   }
 
   async function loadProgramDataFileDocument(documentId) {
-    if (tableDocuments[documentId] || !isProjectProgramDataFileId(documentId)) return;
+    if (tableDocuments[documentId]) return tableDocuments[documentId].programData;
+    if (!isProjectProgramDataFileId(documentId)) return getTableDocument(documentId)?.programData ?? null;
 
     setLoadingProgramDataFileId(documentId);
     setErrorMessage("");
@@ -427,6 +855,7 @@ export default function App() {
 
       const data = await parseJsonResponse(response, "parsed JSON file");
       setTableDocumentFromData(documentId, data);
+      return data;
     } finally {
       setLoadingProgramDataFileId(null);
     }
@@ -443,6 +872,7 @@ export default function App() {
         sortConfig: null,
         advancedSortConfig: null,
         selectedCells: [],
+        selectionRanges: [],
         selectionAnchor: null,
       }));
       setActiveTablePaneId(paneId);
@@ -454,20 +884,23 @@ export default function App() {
   function getAvailableTableDocumentOptions(currentDocumentId) {
     const optionsById = new Map();
     const addOption = (option) => {
-      if (!option?.id || optionsById.has(option.id)) return;
+      if (!isSelectableSpreadsheetOption(option) || optionsById.has(option.id)) return;
+      const label = option.label || getTableDocumentOptionLabel(option.id);
+
+      if (isImportedSpreadsheetDocumentId(option.id) && hasMatchingSavedProgramDataOption(optionsById, option, label)) return;
+
       optionsById.set(option.id, {
         ...option,
-        label: option.label || getTableDocumentOptionLabel(option.id),
+        label,
       });
     };
-
-    addOption({ id: currentDocumentId, label: getTableDocumentOptionLabel(currentDocumentId), source: "current" });
 
     for (const file of availableProgramDataFiles) {
       addOption({
         id: file.id,
         label: file.label,
         path: file.path,
+        rowCount: file.rowCount,
         source: file.source,
       });
     }
@@ -476,6 +909,7 @@ export default function App() {
       addOption({
         id: documentId,
         label: tableDocument.draftProjectName,
+        rowCount: tableDocument.draftRows.length,
         source: "loaded",
       });
     }
@@ -486,6 +920,7 @@ export default function App() {
       addOption({
         id: documentId,
         label: getTableDocumentOptionLabel(documentId),
+        rowCount: getTableDocument(documentId).draftRows.length,
         source: "pane",
       });
     }
@@ -501,20 +936,68 @@ export default function App() {
 
   function hasTableDocumentUnsavedEdits(documentId = DEFAULT_TABLE_DOCUMENT_ID) {
     const tableDocument = getTableDocument(documentId);
-    if (!tableDocument?.programData) return false;
-
-    return (
-      JSON.stringify(tableDocument.draftRows) !== JSON.stringify(createRows(tableDocument.programData)) ||
-      serializeCellStyles(tableDocument.cellStyles) !== serializeCellStyles(createCellStyles(tableDocument.programData)) ||
-      normalizeProjectName(tableDocument.draftProjectName) !== getProgramTitle(tableDocument.programData)
-    );
+    return Boolean(tableDocument?.programData && tableDocument.isDirty);
   }
 
   function applyProjectSnapshot(snapshot) {
-    applyProgramData(snapshot.programData);
+    const workspaceState = snapshot.workspaceState ?? {};
+    const restoredTableDocuments = restoreTableDocumentsFromWorkspaceState(workspaceState, snapshot.programData);
+    const restoredSavedStackingConflicts = restoreStackingConflictsFromWorkspaceState(workspaceState, restoredTableDocuments);
+    const restoredStackingConflicts = Object.entries(restoredTableDocuments).flatMap(([documentId, tableDocument]) =>
+      deriveStackingConflictsForDocument(documentId, tableDocument, restoredSavedStackingConflicts),
+    );
+    const defaultDocument = restoredTableDocuments[DEFAULT_TABLE_DOCUMENT_ID] ?? createTableDocumentFromData(snapshot.programData);
     const programTableState = snapshot.tableState?.program ?? {};
+    const restoredWorkspaceSlots = restoreWorkspaceSlots(workspaceState.workspaceSlots);
+    const restoredPaneWidths = restoreWorkspacePaneWidths(workspaceState.workspacePaneWidths, restoredWorkspaceSlots.length);
+    const restoredActiveTablePaneId = isWorkspacePaneIdInSlots(restoredWorkspaceSlots, workspaceState.activeTablePaneId)
+      ? workspaceState.activeTablePaneId
+      : null;
+    const firstDiagramState = restoredWorkspaceSlots.find((slot) => getWorkspacePaneType(slot) === "diagrams")?.diagramState;
+
+    setProgramData(snapshot.programData);
+    setBlankSpreadsheetCellValues(isPlainObject(workspaceState.blankSpreadsheetCellValues) ? workspaceState.blankSpreadsheetCellValues : {});
+    setTableDocuments(restoredTableDocuments);
+    setDraftProjectName(defaultDocument.draftProjectName);
+    setDraftRows(defaultDocument.draftRows);
+    setCellStyles(defaultDocument.cellStyles);
+    setTableHistory(createEmptyTableHistory());
+    setStackingConflicts(restoredStackingConflicts);
+    setActiveConflictCellKey(null);
+    setConflictMenu(null);
+    setFooterConflictMenuPaneId(null);
+    setTableColumnWidths(restoreTableColumnWidths(workspaceState.tableColumnWidths));
+    setTableRowHeights(isPlainObject(workspaceState.tableRowHeights) ? workspaceState.tableRowHeights : {});
     setSortConfig(normalizeSortConfig(programTableState.sortConfig));
     setAdvancedSortConfig(normalizeAdvancedSortConfig(programTableState.advancedSortConfig));
+    setSelectedTableCells([]);
+    setSelectedTableRanges([]);
+    setTableSelectionAnchor(null);
+    setWorkspaceSlots(restoredWorkspaceSlots);
+    setWorkspacePaneWidths(restoredPaneWidths);
+    syncWorkspaceToolFlags(restoredWorkspaceSlots);
+    setActiveTablePaneId(restoredActiveTablePaneId);
+    setActiveWorkspacePane(restoredActiveTablePaneId ? { id: restoredActiveTablePaneId, type: "table" } : null);
+    setActiveDiagramView(firstDiagramState?.activeView ?? "stacking");
+    setStackingSettings({
+      ...createDefaultStackingSettings(),
+      ...(firstDiagramState?.stackingSettings ?? {}),
+    });
+    setSpreadsheetSettings(normalizeSpreadsheetSettings(workspaceState.spreadsheetSettings));
+    setDraftSpreadsheetSettings(normalizeSpreadsheetSettings(workspaceState.spreadsheetSettings));
+    setIsToolMenuOpen(false);
+    setSideToolMenu(null);
+    setIsProjectMenuOpen(false);
+    setColumnMenu(null);
+    setOpenSpreadsheetTitlePaneId(null);
+    setSpreadsheetSettingsPaneId(null);
+    setEditingTableCell(null);
+    setTableSelectionDragState(null);
+    setIsExitConfirmOpen(false);
+    setPendingTableClosePaneId(null);
+    closeAdvancedSortDialog();
+    nextWorkspacePaneId.current = Math.max(nextWorkspacePaneId.current, getNextWorkspacePaneId(restoredWorkspaceSlots));
+    nextStackingConflictId.current = Math.max(nextStackingConflictId.current, getNextStackingConflictId(restoredStackingConflicts));
   }
 
   async function handleCreateNewProject() {
@@ -525,6 +1008,8 @@ export default function App() {
     });
     setWorkspaceSlots([]);
     setWorkspacePaneWidths([]);
+    setActiveWorkspacePane(null);
+    setActiveTablePaneId(null);
     setIsTableOpen(false);
     setIsDiagramsOpen(false);
     setIsToolMenuOpen(false);
@@ -547,21 +1032,16 @@ export default function App() {
     setStatusMessage("");
 
     try {
-      const response = await fetch(PROJECT_ENDPOINT);
+      const response = await fetch(PROJECT_ENDPOINT, { cache: "no-store" });
       if (!response.ok) {
         throw await createResponseError(response, "Could not load last project");
       }
 
       const snapshot = await parseJsonResponse(response, "last project");
       applyProjectSnapshot(snapshot);
-      setWorkspaceSlots([]);
-      setWorkspacePaneWidths([]);
-      setIsTableOpen(false);
-      setIsDiagramsOpen(false);
-      setIsToolMenuOpen(false);
-      setSideToolMenu(null);
       setIsStartDialogOpen(false);
       setStatusMessage("Loaded last project.");
+      refreshAvailableProgramDataFiles();
     } catch (error) {
       setErrorMessage(error.message);
     } finally {
@@ -624,10 +1104,13 @@ export default function App() {
           sortConfig: null,
           advancedSortConfig: null,
           selectedCells: [],
+          selectionRanges: [],
           selectionAnchor: null,
         }));
         setActiveTablePaneId(targetPaneId);
+        setActiveWorkspacePane({ id: targetPaneId, type: "table" });
       } else {
+        const tablePane = createWorkspacePane("table", importedDocumentId);
         applyProgramData(data);
         setSortConfig(null);
         setAdvancedSortConfig(null);
@@ -635,10 +1118,13 @@ export default function App() {
         setSideToolMenu(null);
         setIsDiagramsOpen(false);
         setIsTableOpen(true);
-        setWorkspaceSlots([createWorkspacePane("table", importedDocumentId)]);
+        setWorkspaceSlots([tablePane]);
         setWorkspacePaneWidths([1]);
+        setActiveWorkspacePane({ id: tablePane.id, type: "table" });
+        setActiveTablePaneId(tablePane.id);
       }
       setIsStartDialogOpen(false);
+      await refreshAvailableProgramDataFiles();
     } catch (error) {
       setErrorMessage(error.message);
     } finally {
@@ -668,14 +1154,9 @@ export default function App() {
 
       const snapshot = await parseJsonResponse(response, "imported project");
       applyProjectSnapshot(snapshot);
-      setWorkspaceSlots([]);
-      setWorkspacePaneWidths([]);
-      setIsTableOpen(false);
-      setIsDiagramsOpen(false);
-      setIsToolMenuOpen(false);
-      setSideToolMenu(null);
       setIsStartDialogOpen(false);
       setStatusMessage(`Imported ${file.name}.`);
+      refreshAvailableProgramDataFiles();
     } catch (error) {
       setErrorMessage(error.message);
     } finally {
@@ -698,15 +1179,297 @@ export default function App() {
   }
 
   function createProjectSnapshot() {
+    const currentProgramData = getCurrentProgramData();
+
     return {
-      programData: getCurrentProgramData(),
+      programData: currentProgramData,
       tableState: {
         program: {
           sortConfig,
           advancedSortConfig,
         },
       },
+      workspaceState: createWorkspaceStateSnapshot(currentProgramData),
     };
+  }
+
+  function createWorkspaceStateSnapshot(currentProgramData) {
+    const serializableWorkspaceSlots = workspaceSlots.map((slot, index) => createSerializableWorkspaceSlot(slot, index));
+
+    return {
+      version: 1,
+      workspaceSlots: serializableWorkspaceSlots,
+      workspacePaneWidths: getPaneWidthsForCount(serializableWorkspaceSlots.length),
+      tableDocuments: createSerializableTableDocuments(currentProgramData),
+      blankSpreadsheetCellValues,
+      tableColumnWidths,
+      tableRowHeights,
+      activeTablePaneId: isWorkspacePaneIdInSlots(serializableWorkspaceSlots, activeTablePaneId) ? activeTablePaneId : null,
+      stackingConflicts: createSerializableStackingConflicts(),
+      activeDiagramView,
+      stackingSettings,
+      spreadsheetSettings,
+    };
+  }
+
+  function createSerializableStackingConflicts() {
+    return stackingConflicts
+      .map(normalizeStackingConflictForSnapshot)
+      .filter(Boolean);
+  }
+
+  function normalizeStackingConflictForSnapshot(conflict) {
+    if (!isPlainObject(conflict)) return null;
+
+    const columnKey = String(conflict.columnKey || "floor");
+    if (!allTableColumns.some((column) => column.key === columnKey)) return null;
+
+    const rowIds = Array.isArray(conflict.rowIds)
+      ? conflict.rowIds.map((rowId) => String(rowId)).filter(Boolean)
+      : [];
+    if (rowIds.length === 0) return null;
+
+    return {
+      id: String(conflict.id || ""),
+      columnKey,
+      documentId: String(conflict.documentId || DEFAULT_TABLE_DOCUMENT_ID),
+      rowIds: [...new Set(rowIds)],
+      segmentLabel: String(conflict.segmentLabel || "Dragged rectangle"),
+      sourceDiagramPaneId: String(conflict.sourceDiagramPaneId ?? ""),
+      sourceFloorKey: String(conflict.sourceFloorKey ?? ""),
+      sourceFloorLabel: String(conflict.sourceFloorLabel || "Previous floor"),
+      sourceFloorValue: String(conflict.sourceFloorValue ?? ""),
+      status: conflict.status === "ignored" ? "ignored" : "pending",
+      targetFloorKey: String(conflict.targetFloorKey ?? ""),
+      targetFloorLabel: String(conflict.targetFloorLabel || `Floor ${conflict.targetFloorValue ?? ""}`),
+      targetFloorValue: String(conflict.targetFloorValue ?? ""),
+    };
+  }
+
+  function createSerializableWorkspaceSlot(slot, index) {
+    const type = getWorkspacePaneType(slot);
+    const id = getWorkspacePaneId(slot, index);
+
+    return {
+      id,
+      type,
+      tableState: normalizeWorkspaceTableState(typeof slot === "string" ? createDefaultTablePaneState() : slot.tableState),
+      diagramState: normalizeWorkspaceDiagramState(typeof slot === "string" ? createDefaultDiagramState() : slot.diagramState),
+    };
+  }
+
+  function createSerializableTableDocuments(currentProgramData) {
+    const documents = {};
+
+    for (const [documentId, tableDocument] of Object.entries(tableDocuments)) {
+      documents[documentId] = normalizeTableDocumentForSnapshot(documentId, tableDocument, currentProgramData);
+    }
+
+    if (!documents[DEFAULT_TABLE_DOCUMENT_ID]) {
+      documents[DEFAULT_TABLE_DOCUMENT_ID] = createTableDocumentFromData(currentProgramData);
+    }
+
+    return documents;
+  }
+
+  function normalizeTableDocumentForSnapshot(documentId, tableDocument, currentProgramData) {
+    const fallbackProgramData =
+      documentId === DEFAULT_TABLE_DOCUMENT_ID
+        ? currentProgramData
+        : tableDocument?.programData ?? createEmptyProgramData(tableDocument?.draftProjectName || "Untitled Project");
+    const baseDocument = createTableDocumentFromData(fallbackProgramData);
+    const draftRowsForSnapshot = Array.isArray(tableDocument?.draftRows) ? tableDocument.draftRows : baseDocument.draftRows;
+    const cellStylesForSnapshot = isPlainObject(tableDocument?.cellStyles) ? tableDocument.cellStyles : baseDocument.cellStyles;
+    const draftProjectNameForSnapshot = typeof tableDocument?.draftProjectName === "string" ? tableDocument.draftProjectName : baseDocument.draftProjectName;
+    const shouldUseCurrentProgramData =
+      spreadsheetSettings.distributeIdenticalRooms &&
+      documentId === DEFAULT_TABLE_DOCUMENT_ID &&
+      fallbackProgramData === currentProgramData;
+    const programDataForSnapshot = shouldUseCurrentProgramData
+      ? fallbackProgramData
+      : mergeRowsIntoProgramData(
+          fallbackProgramData,
+          draftRowsForSnapshot,
+          cellStylesForSnapshot,
+          draftProjectNameForSnapshot,
+          {
+            distributeIdenticalRooms: spreadsheetSettings.distributeIdenticalRooms,
+          },
+        );
+
+    return {
+      programData: programDataForSnapshot,
+      draftProjectName: draftProjectNameForSnapshot,
+      draftRows: spreadsheetSettings.distributeIdenticalRooms ? createRows(programDataForSnapshot) : draftRowsForSnapshot,
+      cellStyles: spreadsheetSettings.distributeIdenticalRooms ? createCellStyles(programDataForSnapshot) : cellStylesForSnapshot,
+      isDirty: Boolean(tableDocument?.isDirty),
+    };
+  }
+
+  function restoreTableDocumentsFromWorkspaceState(workspaceState, fallbackProgramData) {
+    const restoredDocuments = {};
+    const storedDocuments = isPlainObject(workspaceState?.tableDocuments) ? workspaceState.tableDocuments : {};
+
+    for (const [documentId, tableDocument] of Object.entries(storedDocuments)) {
+      if (!documentId || !isPlainObject(tableDocument)) continue;
+      restoredDocuments[documentId] = restoreTableDocument(tableDocument, fallbackProgramData);
+    }
+
+    if (!restoredDocuments[DEFAULT_TABLE_DOCUMENT_ID]) {
+      restoredDocuments[DEFAULT_TABLE_DOCUMENT_ID] = createTableDocumentFromData(fallbackProgramData);
+    }
+
+    return restoredDocuments;
+  }
+
+  function restoreTableDocument(tableDocument, fallbackProgramData) {
+    const baseProgramData = isPlainObject(tableDocument.programData) ? tableDocument.programData : fallbackProgramData;
+    const baseDocument = createTableDocumentFromData(baseProgramData);
+
+    return {
+      programData: baseProgramData,
+      draftProjectName: typeof tableDocument.draftProjectName === "string" ? tableDocument.draftProjectName : baseDocument.draftProjectName,
+      draftRows: Array.isArray(tableDocument.draftRows) ? tableDocument.draftRows : baseDocument.draftRows,
+      cellStyles: isPlainObject(tableDocument.cellStyles) ? tableDocument.cellStyles : baseDocument.cellStyles,
+      isDirty: Boolean(tableDocument.isDirty),
+    };
+  }
+
+  function restoreStackingConflictsFromWorkspaceState(workspaceState, tableDocumentsForRestore) {
+    const storedConflicts = Array.isArray(workspaceState?.stackingConflicts) ? workspaceState.stackingConflicts : [];
+
+    return storedConflicts
+      .map((conflict, index) => restoreStackingConflict(conflict, index, tableDocumentsForRestore))
+      .filter(Boolean);
+  }
+
+  function restoreStackingConflict(conflict, index, tableDocumentsForRestore) {
+    const normalizedConflict = normalizeStackingConflictForSnapshot(conflict);
+    if (!normalizedConflict) return null;
+
+    const tableDocument = tableDocumentsForRestore[normalizedConflict.documentId];
+    const rows = Array.isArray(tableDocument?.draftRows) ? tableDocument.draftRows : [];
+    if (rows.length === 0) return null;
+
+    const rowsById = new Map(rows.map((row) => [String(row.id), row]));
+    const rowIds = normalizedConflict.rowIds
+      .filter((rowId) => {
+        const row = rowsById.get(String(rowId));
+        if (!row) return false;
+        if (normalizedConflict.columnKey !== "floor") return true;
+        return !doFloorValuesMatch(row.floor, normalizedConflict.targetFloorValue);
+      })
+      .map((rowId) => rowsById.get(String(rowId)).id);
+
+    if (rowIds.length === 0) return null;
+
+    return {
+      ...normalizedConflict,
+      id: normalizedConflict.id || `stacking-conflict-${index + 1}`,
+      rowIds,
+    };
+  }
+
+  function restoreWorkspaceSlots(storedSlots) {
+    if (!Array.isArray(storedSlots)) return [];
+
+    return storedSlots
+      .map((slot, index) => {
+        const type = slot?.type === "table" || slot?.type === "diagrams" ? slot.type : null;
+        if (!type) return null;
+
+        return {
+          id: normalizeWorkspacePaneId(slot.id, type, index),
+          type,
+          tableState: normalizeWorkspaceTableState(slot.tableState),
+          diagramState: normalizeWorkspaceDiagramState(slot.diagramState),
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function normalizeWorkspacePaneId(value, type, index) {
+    const id = String(value ?? "").trim();
+    return id || `workspace-pane-${type}-${index + 1}`;
+  }
+
+  function normalizeWorkspaceTableState(tableState) {
+    const selectionRanges = getSelectionRangesFromState(tableState);
+
+    return {
+      documentId: String(tableState?.documentId || DEFAULT_TABLE_DOCUMENT_ID),
+      sortConfig: normalizeSortConfig(tableState?.sortConfig),
+      advancedSortConfig: normalizeAdvancedSortConfig(tableState?.advancedSortConfig),
+      selectedCells: [],
+      selectionRanges,
+      selectionAnchor: normalizeTableCellReference(tableState?.selectionAnchor),
+    };
+  }
+
+  function normalizeWorkspaceDiagramState(diagramState) {
+    return {
+      activeView: diagramState?.activeView === "areas" ? "areas" : "stacking",
+      stackingSettings: {
+        ...createDefaultStackingSettings(),
+        ...(isPlainObject(diagramState?.stackingSettings) ? diagramState.stackingSettings : {}),
+      },
+      sourceDocumentId: String(diagramState?.sourceDocumentId ?? ""),
+      stackingDiagram: diagramState?.stackingDiagram ?? null,
+    };
+  }
+
+  function normalizeTableCellReference(cell) {
+    if (!cell?.rowId || !cell?.columnKey) return null;
+    return {
+      rowId: String(cell.rowId),
+      columnKey: String(cell.columnKey),
+    };
+  }
+
+  function restoreWorkspacePaneWidths(storedWidths, count) {
+    if (count <= 0) return [];
+    if (!Array.isArray(storedWidths) || storedWidths.length !== count) return createEqualPaneWidths(count);
+
+    const widths = storedWidths.map((width) => Number(width)).filter((width) => Number.isFinite(width) && width > 0);
+    return widths.length === count ? normalizePaneWidths(widths) : createEqualPaneWidths(count);
+  }
+
+  function restoreTableColumnWidths(storedWidths) {
+    return isPlainObject(storedWidths)
+      ? {
+          ...createDefaultTableColumnWidths(),
+          ...storedWidths,
+        }
+      : createDefaultTableColumnWidths();
+  }
+
+  function isWorkspacePaneIdInSlots(slots, paneId) {
+    if (!paneId) return false;
+    return slots.some((slot, index) => getWorkspacePaneId(slot, index) === paneId);
+  }
+
+  function getNextWorkspacePaneId(slots) {
+    let nextId = 1;
+
+    for (const slot of slots) {
+      const match = String(slot?.id ?? "").match(/^workspace-pane-(\d+)$/);
+      if (!match) continue;
+      nextId = Math.max(nextId, Number(match[1]) + 1);
+    }
+
+    return nextId;
+  }
+
+  function getNextStackingConflictId(conflicts) {
+    let nextId = 1;
+
+    for (const conflict of conflicts) {
+      const match = String(conflict?.id ?? "").match(/^stacking-conflict-(\d+)$/);
+      if (!match) continue;
+      nextId = Math.max(nextId, Number(match[1]) + 1);
+    }
+
+    return nextId;
   }
 
   function getCurrentProgramData() {
@@ -719,6 +1482,9 @@ export default function App() {
             defaultDocument.draftRows,
             defaultDocument.cellStyles,
             defaultDocument.draftProjectName,
+            {
+              distributeIdenticalRooms: spreadsheetSettings.distributeIdenticalRooms,
+            },
           )
         : defaultDocument.programData;
     }
@@ -727,7 +1493,11 @@ export default function App() {
       return createEmptyProgramData(normalizeProjectName(draftProjectName) || "Untitled Project");
     }
 
-    return isTableOpen ? mergeRowsIntoProgramData(programData, draftRows, cellStyles, draftProjectName) : programData;
+    return isTableOpen
+      ? mergeRowsIntoProgramData(programData, draftRows, cellStyles, draftProjectName, {
+          distributeIdenticalRooms: spreadsheetSettings.distributeIdenticalRooms,
+        })
+      : programData;
   }
 
   async function saveProjectToBackend() {
@@ -746,14 +1516,26 @@ export default function App() {
         throw await createResponseError(response, "Could not save project");
       }
 
-      const snapshot = await parseJsonResponse(response, "saved project");
-      applyProjectSnapshot(snapshot);
+      await parseJsonResponse(response, "saved project");
       setStatusMessage("Project saved.");
+      showSavedBanner();
     } catch (error) {
       setErrorMessage(error.message);
     } finally {
       setIsProjectSaving(false);
     }
+  }
+
+  function showSavedBanner() {
+    if (saveBannerTimeoutRef.current) {
+      window.clearTimeout(saveBannerTimeoutRef.current);
+    }
+
+    setSaveBannerKey((key) => key + 1);
+    saveBannerTimeoutRef.current = window.setTimeout(() => {
+      setSaveBannerKey(0);
+      saveBannerTimeoutRef.current = null;
+    }, SAVE_BANNER_DURATION_MS);
   }
 
   async function exportProjectFile() {
@@ -776,7 +1558,10 @@ export default function App() {
 
       const blob = await response.blob();
       const didSave = await saveBlobToFile(blob, `${sanitizeFileName(getProgramTitle(snapshot.programData))}.signal`);
-      if (didSave) setStatusMessage("Project exported.");
+      if (didSave) {
+        await rememberProjectArchive(blob);
+        setStatusMessage("Project exported.");
+      }
     } catch (error) {
       if (error.name !== "AbortError") setErrorMessage(error.message);
     } finally {
@@ -800,13 +1585,16 @@ export default function App() {
   }
 
   function openDiagrams() {
+    const diagramsPane = createWorkspacePane("diagrams");
     setIsToolMenuOpen(false);
     setSideToolMenu(null);
     setIsTableOpen(false);
     setIsExitConfirmOpen(false);
     setIsDiagramsOpen(true);
-    setWorkspaceSlots([createWorkspacePane("diagrams")]);
+    setWorkspaceSlots([diagramsPane]);
     setWorkspacePaneWidths([1]);
+    setActiveWorkspacePane({ id: diagramsPane.id, type: "diagrams" });
+    refreshAvailableProgramDataFiles();
   }
 
   function closeDiagrams() {
@@ -815,10 +1603,7 @@ export default function App() {
     setWorkspacePaneWidths(createEqualPaneWidths(nextSlots.length));
     syncWorkspaceToolFlags(nextSlots);
     setSideToolMenu(null);
-  }
-
-  function openWorkspaceMenuFromApp() {
-    setSideToolMenu((currentSide) => (currentSide === "right" ? null : "right"));
+    setActiveWorkspacePane((currentPane) => (currentPane?.type === "diagrams" ? null : currentPane));
   }
 
   function getCurrentWorkspaceSlots() {
@@ -828,9 +1613,8 @@ export default function App() {
     return [];
   }
 
-  function placeToolInWorkspaceSlots(tool, side) {
+  function placeToolInWorkspaceSlots(tool, side, nextPane = createWorkspacePane(tool)) {
     const currentSlots = getCurrentWorkspaceSlots();
-    const nextPane = createWorkspacePane(tool);
     return side === "left" ? [nextPane, ...currentSlots] : [...currentSlots, nextPane];
   }
 
@@ -841,10 +1625,7 @@ export default function App() {
       id,
       type,
       tableState: createDefaultTablePaneState(tableDocumentId),
-      diagramState: {
-        activeView: "stacking",
-        stackingSettings: createDefaultStackingSettings(),
-      },
+      diagramState: createDefaultDiagramState(),
     };
   }
 
@@ -854,6 +1635,24 @@ export default function App() {
 
   function getWorkspacePaneId(slot, index) {
     return typeof slot === "string" ? `${slot}-${index}` : slot.id;
+  }
+
+  function activateWorkspacePane(paneId, paneType) {
+    if (!paneId || !paneType) return;
+    setActiveWorkspacePane((currentPane) =>
+      currentPane?.id === paneId && currentPane?.type === paneType
+        ? currentPane
+        : { id: paneId, type: paneType },
+    );
+    if (paneType === "table") setActiveTablePaneId(paneId);
+  }
+
+  function clearActiveWorkspacePane(paneId) {
+    setActiveWorkspacePane((currentPane) => (currentPane?.id === paneId ? null : currentPane));
+  }
+
+  function isTablePanelActiveForKeyboard() {
+    return !activeWorkspacePane || activeWorkspacePane.type === "table";
   }
 
   function syncWorkspaceToolFlags(slots) {
@@ -910,11 +1709,13 @@ export default function App() {
         sortConfig,
         advancedSortConfig,
         selectedCells: selectedTableCells,
+        selectionRanges: selectedTableRanges,
         selectionAnchor: tableSelectionAnchor,
       });
       setSortConfig(nextState.sortConfig ?? null);
       setAdvancedSortConfig(nextState.advancedSortConfig ?? null);
-      setSelectedTableCells(nextState.selectedCells ?? []);
+      setSelectedTableRanges(getSelectionRangesFromState(nextState));
+      setSelectedTableCells([]);
       setTableSelectionAnchor(nextState.selectionAnchor ?? null);
       return;
     }
@@ -930,9 +1731,186 @@ export default function App() {
     return typeof pane === "string" ? createDefaultTablePaneState() : pane?.tableState ?? createDefaultTablePaneState();
   }
 
+  function createTableHistorySnapshot(overrides = {}) {
+    return {
+      tableDocuments,
+      draftRows,
+      cellStyles,
+      blankSpreadsheetCellValues,
+      tableColumnWidths,
+      tableRowHeights,
+      stackingConflicts,
+      ...overrides,
+    };
+  }
+
+  function pushTableHistorySnapshot(snapshot = createTableHistorySnapshot()) {
+    if (!snapshot) return;
+
+    setTableHistory((history) => ({
+      past: [...history.past, snapshot].slice(-MAX_TABLE_HISTORY_ENTRIES),
+      future: [],
+    }));
+  }
+
+  function applyTableHistorySnapshot(snapshot) {
+    if (!snapshot) return;
+
+    setTableDocuments(snapshot.tableDocuments ?? {});
+    setDraftRows(snapshot.draftRows ?? []);
+    setCellStyles(snapshot.cellStyles ?? {});
+    setBlankSpreadsheetCellValues(snapshot.blankSpreadsheetCellValues ?? {});
+    setTableColumnWidths(snapshot.tableColumnWidths ?? createDefaultTableColumnWidths());
+    setTableRowHeights(snapshot.tableRowHeights ?? {});
+    setStackingConflicts(snapshot.stackingConflicts ?? []);
+    setActiveConflictCellKey(null);
+    setConflictMenu(null);
+    setFooterConflictMenuPaneId(null);
+  }
+
+  function undoTableAction() {
+    if (tableHistory.past.length === 0) return;
+
+    const previousSnapshot = tableHistory.past[tableHistory.past.length - 1];
+    const currentSnapshot = createTableHistorySnapshot();
+    applyTableHistorySnapshot(previousSnapshot);
+    setEditingTableCell(null);
+    setTableHistory({
+      past: tableHistory.past.slice(0, -1),
+      future: [currentSnapshot, ...tableHistory.future].slice(0, MAX_TABLE_HISTORY_ENTRIES),
+    });
+  }
+
+  function redoTableAction() {
+    if (tableHistory.future.length === 0) return;
+
+    const nextSnapshot = tableHistory.future[0];
+    const currentSnapshot = createTableHistorySnapshot();
+    applyTableHistorySnapshot(nextSnapshot);
+    setEditingTableCell(null);
+    setTableHistory({
+      past: [...tableHistory.past, currentSnapshot].slice(-MAX_TABLE_HISTORY_ENTRIES),
+      future: tableHistory.future.slice(1),
+    });
+  }
+
+  function registerTableShell(paneId, element) {
+    if (!paneId || !element) return;
+
+    const viewKey = getTableViewKeyFromElement(element);
+    restoreTableViewportMetrics(paneId, element, viewKey);
+    updateTableViewportMetrics(paneId, element, viewKey);
+  }
+
+  function captureCurrentTableViewportMetrics() {
+    if (typeof document === "undefined") return;
+
+    const elements = [...document.querySelectorAll(".table-shell[data-table-pane-id]")].filter(
+      (element) => element instanceof HTMLElement,
+    );
+    if (elements.length === 0) return;
+
+    setTableViewportMetrics((metricsByPaneId) =>
+      elements.reduce((nextMetricsByPaneId, element) => {
+        const paneId = element.dataset.tablePaneId;
+        const viewKey = getTableViewKeyFromElement(element);
+        return setTableViewportMetricsForPane(nextMetricsByPaneId, paneId, viewKey, readTableViewportMetrics(element));
+      }, metricsByPaneId),
+    );
+  }
+
+  function restoreTableViewportMetrics(paneId, element, viewKey) {
+    const metrics = getTableViewportMetricsFromState(tableViewportMetricsRef.current, paneId, viewKey);
+    if (!metrics) return;
+
+    if (element.scrollLeft !== metrics.scrollLeft) {
+      element.scrollLeft = metrics.scrollLeft;
+    }
+    if (element.scrollTop !== metrics.scrollTop) {
+      element.scrollTop = metrics.scrollTop;
+    }
+  }
+
+  function updateTableViewportMetrics(paneId, element, viewKey = TABLE_VIEW_SPREADSHEET) {
+    if (!paneId || !element) return;
+
+    const nextMetrics = readTableViewportMetrics(element);
+
+    setTableViewportMetrics((metricsByPaneId) => {
+      return setTableViewportMetricsForPane(metricsByPaneId, paneId, viewKey, nextMetrics);
+    });
+  }
+
+  function getTableViewportMetricsForPane(paneId, viewKey) {
+    return getTableViewportMetricsFromState(tableViewportMetrics, paneId, viewKey);
+  }
+
+  function getTableViewportMetricsFromState(metricsByPaneId, paneId, viewKey) {
+    const paneMetrics = metricsByPaneId?.[paneId];
+    if (!paneMetrics) return null;
+    if (isTableViewportMetrics(paneMetrics)) {
+      return viewKey === TABLE_VIEW_SPREADSHEET ? paneMetrics : null;
+    }
+
+    return isTableViewportMetrics(paneMetrics[viewKey]) ? paneMetrics[viewKey] : null;
+  }
+
+  function setTableViewportMetricsForPane(metricsByPaneId, paneId, viewKey, nextMetrics) {
+    if (!paneId || !isTableViewportMetrics(nextMetrics)) return metricsByPaneId;
+
+    const normalizedViewKey = viewKey === TABLE_VIEW_HIERARCHICAL ? TABLE_VIEW_HIERARCHICAL : TABLE_VIEW_SPREADSHEET;
+    const paneMetrics = metricsByPaneId[paneId];
+    const currentMetrics = getTableViewportMetricsFromState(metricsByPaneId, paneId, normalizedViewKey);
+    if (areTableViewportMetricsEqual(currentMetrics, nextMetrics)) return metricsByPaneId;
+
+    const nextPaneMetrics = isTableViewportMetrics(paneMetrics)
+      ? { [TABLE_VIEW_SPREADSHEET]: paneMetrics }
+      : { ...(isPlainObject(paneMetrics) ? paneMetrics : {}) };
+
+    return {
+      ...metricsByPaneId,
+      [paneId]: {
+        ...nextPaneMetrics,
+        [normalizedViewKey]: nextMetrics,
+      },
+    };
+  }
+
+  function readTableViewportMetrics(element) {
+    return {
+      scrollLeft: element.scrollLeft,
+      scrollTop: element.scrollTop,
+      clientWidth: element.clientWidth,
+      clientHeight: element.clientHeight,
+    };
+  }
+
+  function areTableViewportMetricsEqual(currentMetrics, nextMetrics) {
+    return Boolean(
+      currentMetrics &&
+        currentMetrics.scrollLeft === nextMetrics.scrollLeft &&
+        currentMetrics.scrollTop === nextMetrics.scrollTop &&
+        currentMetrics.clientWidth === nextMetrics.clientWidth &&
+        currentMetrics.clientHeight === nextMetrics.clientHeight,
+    );
+  }
+
+  function isTableViewportMetrics(value) {
+    return Boolean(
+      value &&
+        Number.isFinite(value.scrollLeft) &&
+        Number.isFinite(value.scrollTop) &&
+        Number.isFinite(value.clientWidth) &&
+        Number.isFinite(value.clientHeight),
+    );
+  }
+
+  function getTableViewKeyFromElement(element) {
+    return element?.dataset?.tableView === TABLE_VIEW_HIERARCHICAL ? TABLE_VIEW_HIERARCHICAL : TABLE_VIEW_SPREADSHEET;
+  }
+
   function getActiveTableSelectedCells() {
-    if (!activeTablePaneId) return selectedTableCells;
-    return getTablePaneStateById(activeTablePaneId).selectedCells ?? [];
+    return getTableNavigationContext(activeTablePaneId ?? null).selectedCells;
   }
 
   function closeWorkspacePane(paneId) {
@@ -942,6 +1920,7 @@ export default function App() {
     setWorkspacePaneWidths(nextWidths);
     syncWorkspaceToolFlags(nextSlots);
     setSideToolMenu(null);
+    clearActiveWorkspacePane(paneId);
     if (openSpreadsheetTitlePaneId === paneId) setOpenSpreadsheetTitlePaneId(null);
     if (activeTablePaneId === paneId) setActiveTablePaneId(null);
     if (advancedSortPaneId === paneId) closeAdvancedSortDialog();
@@ -985,37 +1964,1349 @@ export default function App() {
 
   async function openWorkspaceTool(tool, side = "right") {
     const currentSlots = getCurrentWorkspaceSlots();
-    const nextSlots = placeToolInWorkspaceSlots(tool, side);
+    const nextPane = createWorkspacePane(tool);
+    const nextSlots = placeToolInWorkspaceSlots(tool, side, nextPane);
     setIsToolMenuOpen(false);
     setSideToolMenu(null);
     setWorkspaceSlots(nextSlots);
     setWorkspacePaneWidths(getPaneWidthsWithAddedPane(currentSlots.length, side));
+    setActiveWorkspacePane({ id: nextPane.id, type: tool });
+    if (tool === "table") setActiveTablePaneId(nextPane.id);
     syncWorkspaceToolFlags(nextSlots);
 
     if (nextSlots.some((slot) => getWorkspacePaneType(slot) === "table")) {
       await prepareTableForWorkspace();
     }
+
+    if (nextSlots.some((slot) => getWorkspacePaneType(slot) === "diagrams")) {
+      refreshAvailableProgramDataFiles();
+    }
   }
 
   async function openTable() {
+    const tablePane = createWorkspacePane("table");
     setIsToolMenuOpen(false);
     setSideToolMenu(null);
     setIsDiagramsOpen(false);
     setIsTableOpen(true);
-    setWorkspaceSlots([createWorkspacePane("table")]);
+    setWorkspaceSlots([tablePane]);
     setWorkspacePaneWidths([1]);
+    setActiveWorkspacePane({ id: tablePane.id, type: "table" });
+    setActiveTablePaneId(tablePane.id);
     await prepareTableForWorkspace();
   }
 
-  function updateRow(rowId, field, value, documentId = DEFAULT_TABLE_DOCUMENT_ID) {
-    updateTableDocument(documentId, (tableDocument) => ({
+  function updateRow(rowId, field, value, documentId = DEFAULT_TABLE_DOCUMENT_ID, { recordHistory = true } = {}) {
+    const tableDocument = getTableDocument(documentId);
+    const existingRow = tableDocument.draftRows.find((row) => row.id === rowId);
+    const isExistingRow = Boolean(existingRow);
+
+    if (!isExistingRow && tableDocument.draftRows.length === 0) {
+      const currentValue = blankSpreadsheetCellValues[documentId]?.[rowId]?.[field] ?? "";
+      if (String(currentValue) === String(value ?? "")) return;
+      if (recordHistory) pushTableHistorySnapshot();
+
+      setBlankSpreadsheetCellValues((values) => ({
+        ...values,
+        [documentId]: {
+          ...(values[documentId] ?? {}),
+          [rowId]: {
+            ...(values[documentId]?.[rowId] ?? {}),
+            [field]: value,
+          },
+        },
+      }));
+      return;
+    }
+
+    if (!existingRow || String(existingRow[field] ?? "") === String(value ?? "")) return;
+    if (recordHistory) pushTableHistorySnapshot();
+
+    const nextRows = tableDocument.draftRows.map((row) => (row.id === rowId ? { ...row, [field]: value } : row));
+    const nextDocument = {
       ...tableDocument,
-      draftRows: tableDocument.draftRows.map((row) => (row.id === rowId ? { ...row, [field]: value } : row)),
+      draftRows: nextRows,
+    };
+
+    updateTableDocument(documentId, () => nextDocument);
+    if ((documentId || DEFAULT_TABLE_DOCUMENT_ID) === DEFAULT_TABLE_DOCUMENT_ID) {
+      setDraftRows(nextRows);
+    }
+    if (field === "floor") {
+      setStackingConflicts((conflicts) => mergeStackingConflictsForDocument(conflicts, documentId, nextDocument));
+    }
+  }
+
+  function handleStackingSegmentFloorChange(sourceDocumentId, change, sourceDiagramPaneId = "") {
+    const targetFloorValue = getStackingConflictFloorValue(change.targetFloor, change.targetFloorKey);
+    const documentId = sourceDocumentId || DEFAULT_TABLE_DOCUMENT_ID;
+    const tableDocument = getTableDocument(documentId);
+    const representedRowIds = getStackingSegmentRepresentedRowIds(tableDocument, change);
+    if (representedRowIds.length === 0) return;
+
+    const targetFloorId = getFloorIdForStackingValue(targetFloorValue, `floor-${change.targetFloorKey ?? targetFloorValue}`);
+    const floorIdsByItemId = new Map(representedRowIds.map((rowId) => [String(rowId), targetFloorId]));
+    const nextDocumentsById = new Map();
+
+    for (const { documentId: candidateDocumentId, tableDocument: candidateDocument } of getStackingConflictCandidateDocuments(documentId)) {
+      const candidateItemIds = new Set((candidateDocument.programData?.program_items ?? []).map((item) => String(item.id ?? "")));
+      const candidateFloorIdsByItemId = new Map(
+        [...floorIdsByItemId].filter(([rowId]) => candidateItemIds.has(String(rowId))),
+      );
+      if (candidateFloorIdsByItemId.size === 0) continue;
+
+      const result = updateProgramDataFloorAssignments(candidateDocument.programData, candidateFloorIdsByItemId, "diagram");
+      if (!result.changed) continue;
+
+      nextDocumentsById.set(candidateDocumentId, {
+        ...candidateDocument,
+        programData: result.data,
+        isDirty: true,
+      });
+    }
+
+    if (nextDocumentsById.size === 0) return;
+
+    setTableDocuments((documents) => ({
+      ...documents,
+      ...Object.fromEntries(nextDocumentsById),
+    }));
+
+    const defaultDocument = nextDocumentsById.get(DEFAULT_TABLE_DOCUMENT_ID);
+    if (defaultDocument) {
+      setProgramData(defaultDocument.programData);
+    }
+
+    for (const [candidateDocumentId, nextDocument] of nextDocumentsById) {
+      updateWorkspaceStackingDiagramsForDocument(candidateDocumentId, nextDocument.programData);
+    }
+
+    setStackingConflicts((conflicts) => {
+      let nextConflicts = conflicts;
+      for (const [candidateDocumentId, nextDocument] of nextDocumentsById) {
+        nextConflicts = mergeStackingConflictsForDocument(nextConflicts, candidateDocumentId, nextDocument);
+      }
+      return nextConflicts;
+    });
+
+    const nextDocumentConflicts = [...nextDocumentsById].flatMap(([candidateDocumentId, nextDocument]) =>
+      deriveStackingConflictsForDocument(candidateDocumentId, nextDocument, stackingConflicts),
+    );
+    const affectedRowIds = new Set(representedRowIds);
+    const visibleConflict = nextDocumentConflicts.find(
+      (conflict) =>
+        conflict.status === "pending" &&
+        conflict.rowIds.some((rowId) => affectedRowIds.has(rowId)) &&
+        getTablePaneIdsForDocument(conflict.documentId).length > 0,
+    ) ?? nextDocumentConflicts.find((conflict) => conflict.status === "pending" && conflict.rowIds.some((rowId) => affectedRowIds.has(rowId)));
+
+    setConflictMenu(null);
+    if (visibleConflict) {
+      const nextCellKey = getDocumentCellKey(visibleConflict.documentId, visibleConflict.rowIds[0], visibleConflict.columnKey);
+      setActiveConflictCellKey(nextCellKey);
+      scrollTableConflictIntoView(visibleConflict.documentId, visibleConflict.rowIds[0], visibleConflict.columnKey);
+    } else {
+      setActiveConflictCellKey((currentCellKey) => {
+        if (!currentCellKey) return currentCellKey;
+        return [...nextDocumentsById.keys()].some((candidateDocumentId) =>
+          representedRowIds.some((rowId) => getDocumentCellKey(candidateDocumentId, rowId, "floor") === currentCellKey),
+        )
+          ? null
+          : currentCellKey;
+      });
+    }
+  }
+
+  function getStackingConflictCandidateDocuments(preferredDocumentId) {
+    const candidates = new Map();
+    const preferredDocument = preferredDocumentId ? getTableDocument(preferredDocumentId) : null;
+    const preferredProgramData = preferredDocument?.programData ?? null;
+    const addCandidate = (documentId, tableDocument) => {
+      const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
+      const document = tableDocument ?? getTableDocument(normalizedDocumentId);
+      if (!document?.draftRows?.length) return;
+      if (
+        preferredProgramData &&
+        normalizedDocumentId !== (preferredDocumentId || DEFAULT_TABLE_DOCUMENT_ID) &&
+        !doProgramDataSourcesMatch(preferredProgramData, document.programData)
+      ) {
+        return;
+      }
+      candidates.set(normalizedDocumentId, {
+        documentId: normalizedDocumentId,
+        tableDocument: document,
+      });
+    };
+
+    if (preferredDocumentId) addCandidate(preferredDocumentId, preferredDocument);
+    for (const [documentId, tableDocument] of Object.entries(tableDocuments)) {
+      addCandidate(documentId, tableDocument);
+    }
+    addCandidate(DEFAULT_TABLE_DOCUMENT_ID, getTableDocument(DEFAULT_TABLE_DOCUMENT_ID));
+
+    return [...candidates.values()];
+  }
+
+  function updateLinkedDocumentsDiagramFloorAssignments(preferredDocumentId, floorIdsByItemId) {
+    const nextDocumentsById = new Map();
+
+    for (const { documentId: candidateDocumentId, tableDocument: candidateDocument } of getStackingConflictCandidateDocuments(preferredDocumentId)) {
+      const candidateItemIds = new Set((candidateDocument.programData?.program_items ?? []).map((item) => String(item.id ?? "")));
+      const candidateFloorIdsByItemId = new Map(
+        [...floorIdsByItemId].filter(([rowId]) => candidateItemIds.has(String(rowId))),
+      );
+      if (candidateFloorIdsByItemId.size === 0) continue;
+
+      const result = updateProgramDataFloorAssignments(candidateDocument.programData, candidateFloorIdsByItemId, "diagram");
+      if (!result.changed) continue;
+
+      nextDocumentsById.set(candidateDocumentId, {
+        ...candidateDocument,
+        programData: result.data,
+        isDirty: true,
+      });
+    }
+
+    return nextDocumentsById;
+  }
+
+  function applyUpdatedTableDocuments(nextDocumentsById) {
+    if (!(nextDocumentsById instanceof Map) || nextDocumentsById.size === 0) return;
+
+    setTableDocuments((documents) => ({
+      ...documents,
+      ...Object.fromEntries(nextDocumentsById),
+    }));
+
+    const defaultDocument = nextDocumentsById.get(DEFAULT_TABLE_DOCUMENT_ID);
+    if (defaultDocument) {
+      setProgramData(defaultDocument.programData);
+    }
+  }
+
+  function refreshUpdatedWorkspaceStackingDiagrams(nextDocumentsById) {
+    for (const [candidateDocumentId, nextDocument] of nextDocumentsById) {
+      updateWorkspaceStackingDiagramsForDocument(candidateDocumentId, nextDocument.programData);
+    }
+  }
+
+  function refreshLinkedWorkspaceStackingDiagrams(preferredDocumentId) {
+    for (const { documentId: candidateDocumentId, tableDocument: candidateDocument } of getStackingConflictCandidateDocuments(preferredDocumentId)) {
+      updateWorkspaceStackingDiagramsForDocument(candidateDocumentId, candidateDocument.programData);
+    }
+  }
+
+  function buildStackingDiagramForSource(sourceProgramData, paneSettings) {
+    return buildHealthcareStackingDiagram(
+      sourceProgramData,
+      getEffectiveStackingSettingsForProgramData(sourceProgramData, paneSettings),
+    );
+  }
+
+  function updateWorkspaceStackingDiagramsForDocument(documentId, sourceProgramData) {
+    const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
+
+    setWorkspaceSlots((slots) =>
+      slots.map((slot, index) => {
+        if (typeof slot === "string" || getWorkspacePaneType(slot) !== "diagrams") return slot;
+
+        const diagramState = slot.diagramState ?? createDefaultDiagramState();
+        if ((diagramState.sourceDocumentId || "") !== normalizedDocumentId) return slot;
+
+        return {
+          ...slot,
+          diagramState: {
+            ...diagramState,
+            stackingDiagram: buildStackingDiagramForSource(
+              sourceProgramData,
+              diagramState.stackingSettings ?? createDefaultStackingSettings(),
+            ),
+          },
+        };
+      }),
+    );
+  }
+
+  function getTablePaneIdsForDocument(documentId) {
+    const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
+    const slots = workspaceSlots.length > 0 ? workspaceSlots : (isTableOpen ? ["table"] : []);
+
+    return slots
+      .map((slot, index) => {
+        if (getWorkspacePaneType(slot) !== "table") return null;
+        const paneId = getWorkspacePaneId(slot, index);
+        const paneDocumentId = typeof slot === "string"
+          ? DEFAULT_TABLE_DOCUMENT_ID
+          : slot.tableState?.documentId ?? DEFAULT_TABLE_DOCUMENT_ID;
+        return paneDocumentId === normalizedDocumentId ? paneId : null;
+      })
+      .filter(Boolean);
+  }
+
+  function scrollTableConflictIntoView(documentId, rowId, columnKey) {
+    if (typeof document === "undefined") return;
+
+    const paneId = getTablePaneIdsForDocument(documentId)[0];
+    if (!paneId) return;
+
+    const tableState = getTablePaneStateById(paneId);
+    const tableDocument = getTableDocument(documentId);
+    const rows = getTableRowsForDisplay(
+      documentId,
+      tableDocument,
+      tableState.sortConfig ?? null,
+      tableState.advancedSortConfig ?? null,
+    );
+    const columnsForDocument = getTableColumnsForDocument(tableDocument, spreadsheetSettings);
+    const rowIndex = rows.findIndex((row) => row.id === rowId);
+    const columnIndex = columnsForDocument.findIndex((column) => column.key === columnKey);
+
+    if (rowIndex < 0 || columnIndex < 0) return;
+
+    const rowTop = getRenderedTableHeaderHeight() + rows
+      .slice(0, rowIndex)
+      .reduce((sum, row) => sum + getRenderedTableRowHeight(row.id), 0);
+    const columnLeft = TABLE_ROW_NUMBER_COLUMN_WIDTH + columnsForDocument
+      .slice(0, columnIndex)
+      .reduce((sum, column) => sum + getTableColumnWidth(column.key), 0);
+
+    window.requestAnimationFrame(() => {
+      const paneSelector = `[data-pane-id="${escapeAttributeSelectorValue(paneId)}"]`;
+      const shell = document.querySelector(`${paneSelector} .table-shell`);
+      if (!(shell instanceof HTMLElement)) return;
+
+      shell.scrollTo({
+        top: Math.max(0, rowTop - getRenderedTableHeaderHeight() - 36),
+        left: Math.max(0, columnLeft - 72),
+        behavior: "smooth",
+      });
+
+      window.requestAnimationFrame(() => scrollTableCellIntoView(paneId, rowId, columnKey, { behavior: "smooth" }));
+    });
+  }
+
+  function focusFirstStackingConflictForDocument(documentId) {
+    const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
+    const conflict = stackingConflicts.find(
+      (currentConflict) =>
+        currentConflict.documentId === normalizedDocumentId &&
+        currentConflict.status === "pending" &&
+        currentConflict.rowIds.length > 0,
+    );
+    if (!conflict) return;
+
+    const rowId = conflict.rowIds[0];
+    setActiveConflictCellKey(getDocumentCellKey(normalizedDocumentId, rowId, conflict.columnKey));
+    setConflictMenu(null);
+    scrollTableConflictIntoView(normalizedDocumentId, rowId, conflict.columnKey);
+  }
+
+  function focusStackingConflict(conflictId) {
+    const conflict = stackingConflicts.find((currentConflict) => currentConflict.id === conflictId);
+    if (!conflict || conflict.rowIds.length === 0) return;
+
+    const documentId = conflict.documentId || DEFAULT_TABLE_DOCUMENT_ID;
+    const rowId = conflict.rowIds[0];
+    setActiveConflictCellKey(getDocumentCellKey(documentId, rowId, conflict.columnKey));
+    setConflictMenu(null);
+    setFooterConflictMenuPaneId(null);
+    scrollTableConflictIntoView(documentId, rowId, conflict.columnKey);
+  }
+
+  function getStackingConflictRowIdsForSegmentFloorChange(documentId, change, sourceFloorValue) {
+    const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
+    const segmentLabel = normalizeStackingGroupKey(change.segment?.label ?? "");
+    if (!segmentLabel) return [];
+
+    return [
+      ...new Set(
+        stackingConflicts.flatMap((conflict) => {
+          if ((conflict.documentId || DEFAULT_TABLE_DOCUMENT_ID) !== normalizedDocumentId || conflict.columnKey !== "floor") return [];
+          if (normalizeStackingGroupKey(conflict.segmentLabel ?? "") !== segmentLabel) return [];
+          if (!doFloorValuesMatch(conflict.targetFloorValue, sourceFloorValue)) return [];
+          return conflict.rowIds ?? [];
+        }),
+      ),
+    ];
+  }
+
+  function getStackingSegmentRepresentedRowIds(tableDocument, change) {
+    const sourceItemIds = [...new Set((change.segment?.sourceItemIds ?? []).map((rowId) => String(rowId)).filter(Boolean))];
+    const sourceFloorValue = getStackingConflictFloorValue(change.sourceFloor, change.sourceFloorKey);
+    const segmentLabel = normalizeStackingGroupKey(change.segment?.label ?? "");
+    if (!segmentLabel) return sourceItemIds;
+
+    const programData = tableDocument.programData ?? {};
+    const departmentsById = new Map((programData.departments ?? []).map((department) => [department.id, department]));
+    const groupsById = new Map((programData.program_groups ?? []).map((group) => [group.id, group]));
+    const itemsById = new Map((programData.program_items ?? []).map((item) => [item.id, item]));
+
+    const fallbackRowIds = (tableDocument.draftRows ?? [])
+      .filter((row) => {
+        const item = itemsById.get(row.id);
+        const itemDiagramFloorValue = normalizeFloorConflictValue(
+          getProgramDataFloorValue(programData, getProgramItemDiagramFloorId(item), getProgramItemDiagramFloorId(item)),
+          getProgramItemDiagramFloorId(item),
+        );
+        if (!doFloorValuesMatch(itemDiagramFloorValue, sourceFloorValue)) return false;
+        const group = groupsById.get(item?.program_group_id ?? row.groupId);
+        const department = departmentsById.get(group?.department_id ?? item?.extensions?.department_id ?? row.departmentId);
+        return getStackingConflictRowLabels(row, item, group, department)
+          .some((value) => normalizeStackingGroupKey(value ?? "") === segmentLabel);
+      })
+      .map((row) => row.id);
+
+    return [...new Set([...sourceItemIds, ...fallbackRowIds])];
+  }
+
+  function getStackingConflictRowLabels(row, item, group, department) {
+    return [
+      row.department,
+      row.programGroup,
+      row.program,
+      department?.name,
+      group?.name,
+      item?.name,
+      item?.source_ref?.original_label,
+      readStackingProperty(item, ["department_name", "departmentName"]),
+      readStackingProperty(item, ["department_function", "departmentFunction", "department_function_name", "departmentFunctionName"]),
+      readStackingProperty(group, ["department_function", "departmentFunction", "department_function_name", "departmentFunctionName"]),
+      readStackingProperty(department, ["department_function", "departmentFunction", "department_function_name", "departmentFunctionName"]),
+      readStackingProperty(item, ["functional_area", "functionalArea", "functional_area_name", "functionalAreaName"]),
+      readStackingProperty(group, ["functional_area", "functionalArea", "functional_area_name", "functionalAreaName"]),
+      readStackingProperty(department, ["functional_area", "functionalArea", "functional_area_name", "functionalAreaName"]),
+      readStackingProperty(item, ["functional_group", "functionalGroup", "functional_group_name", "functionalGroupName"]),
+      readStackingProperty(group, ["functional_group", "functionalGroup", "functional_group_name", "functionalGroupName"]),
+      readStackingProperty(department, ["functional_group", "functionalGroup", "functional_group_name", "functionalGroupName"]),
+    ].filter((value) => value !== undefined && value !== null && value !== "");
+  }
+
+  function getPendingStackingConflictsForDocument(documentId) {
+    const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
+    return stackingConflicts.filter(
+      (conflict) =>
+        (conflict.documentId || DEFAULT_TABLE_DOCUMENT_ID) === normalizedDocumentId &&
+        conflict.status === "pending" &&
+        (conflict.rowIds?.length ?? 0) > 0,
+    );
+  }
+
+  function getRowsWithAppliedStackingConflicts(documentId, rows) {
+    const pendingConflicts = getPendingStackingConflictsForDocument(documentId);
+    if (pendingConflicts.length === 0) return rows;
+
+    return rows.map((row) => {
+      let matchingConflict = null;
+      for (let index = pendingConflicts.length - 1; index >= 0; index -= 1) {
+        const conflict = pendingConflicts[index];
+        if (
+          conflict.columnKey === "floor" &&
+          conflict.rowIds.includes(row.id) &&
+          !doFloorValuesMatch(row.floor, conflict.targetFloorValue)
+        ) {
+          matchingConflict = conflict;
+          break;
+        }
+      }
+
+      return matchingConflict ? { ...row, floor: matchingConflict.targetFloorValue } : row;
+    });
+  }
+
+  function resolveStackingConflict(conflictId) {
+    resolveStackingConflicts([conflictId]);
+  }
+
+  function updateStackingConflictDiagramToMatch(conflictId) {
+    const conflict = stackingConflicts.find((currentConflict) => currentConflict.id === conflictId);
+    if (!conflict) return;
+
+    const documentId = conflict.documentId || DEFAULT_TABLE_DOCUMENT_ID;
+    const sourceFloorId = getFloorIdForStackingValue(
+      conflict.sourceFloorValue,
+      conflict.sourceFloorKey || `floor-${conflict.sourceFloorValue}`,
+    );
+    const floorIdsByItemId = new Map((conflict.rowIds ?? []).map((rowId) => [String(rowId), sourceFloorId]));
+
+    const nextDocumentsById = updateLinkedDocumentsDiagramFloorAssignments(documentId, floorIdsByItemId);
+    if (nextDocumentsById.size === 0) {
+      refreshLinkedWorkspaceStackingDiagrams(documentId);
+      setStackingConflicts((conflicts) => conflicts.filter((currentConflict) => currentConflict.id !== conflictId));
+      setActiveConflictCellKey(null);
+      setConflictMenu(null);
+      setFooterConflictMenuPaneId(null);
+      return;
+    }
+
+    applyUpdatedTableDocuments(nextDocumentsById);
+    refreshUpdatedWorkspaceStackingDiagrams(nextDocumentsById);
+    setStackingConflicts((conflicts) => {
+      let nextConflicts = conflicts;
+      for (const [candidateDocumentId, nextDocument] of nextDocumentsById) {
+        nextConflicts = mergeStackingConflictsForDocument(nextConflicts, candidateDocumentId, nextDocument);
+      }
+      return nextConflicts.filter((currentConflict) => currentConflict.id !== conflictId);
+    });
+    setActiveConflictCellKey(null);
+    setConflictMenu(null);
+    setFooterConflictMenuPaneId(null);
+  }
+
+  function getStackingConflictSpreadsheetFloorValue(conflict) {
+    const documentId = conflict.documentId || DEFAULT_TABLE_DOCUMENT_ID;
+    const tableDocument = getTableDocument(documentId);
+    const rowsById = new Map((tableDocument.draftRows ?? []).map((row) => [row.id, row]));
+    const candidateValues = [];
+
+    for (const rowId of conflict.rowIds ?? []) {
+      const row = rowsById.get(rowId);
+      const floorValue = String(row?.floor ?? "").trim();
+      if (!floorValue || doFloorValuesMatch(floorValue, conflict.targetFloorValue)) continue;
+      candidateValues.push(floorValue);
+    }
+
+    return (
+      candidateValues.find((floorValue) => doFloorValuesMatch(floorValue, conflict.sourceFloorValue)) ??
+      candidateValues[0] ??
+      String(conflict.sourceFloorValue ?? "").trim()
+    );
+  }
+
+  function updateWorkspaceSlotsForStackingConflictDiagram(slots, conflict, spreadsheetFloorValue) {
+    const candidatePaneGroups = getStackingConflictDiagramPaneCandidateGroups(slots, conflict);
+
+    for (const candidatePaneIds of candidatePaneGroups) {
+      let matched = false;
+      let changed = false;
+      const nextSlots = slots.map((slot, index) => {
+        if (typeof slot === "string" || getWorkspacePaneType(slot) !== "diagrams") return slot;
+
+        const paneId = getWorkspacePaneId(slot, index);
+        if (!candidatePaneIds.has(paneId)) return slot;
+
+        const diagramState = slot.diagramState ?? createDefaultDiagramState();
+        const result = updateStackingDiagramToMatchConflictFloor(
+          diagramState.stackingDiagram,
+          conflict,
+          spreadsheetFloorValue,
+        );
+        if (!result.matched) return slot;
+
+        matched = true;
+        if (!result.changed) return slot;
+
+        changed = true;
+        return {
+          ...slot,
+          diagramState: {
+            ...diagramState,
+            stackingDiagram: result.diagram,
+          },
+        };
+      });
+
+      if (matched) {
+        return {
+          slots: changed ? nextSlots : slots,
+          matched,
+        };
+      }
+    }
+
+    return { slots, matched: false };
+  }
+
+  function getStackingConflictDiagramPaneCandidateGroups(slots, conflict) {
+    const normalizedDocumentId = conflict.documentId || DEFAULT_TABLE_DOCUMENT_ID;
+    const sourceDiagramPaneId = String(conflict.sourceDiagramPaneId ?? "");
+    const diagramPanes = slots
+      .map((slot, index) => (
+        typeof slot === "string" || getWorkspacePaneType(slot) !== "diagrams"
+          ? null
+          : {
+              paneId: getWorkspacePaneId(slot, index),
+              sourceDocumentId: slot.diagramState?.sourceDocumentId ?? "",
+            }
+      ))
+      .filter(Boolean);
+    const candidateGroups = [];
+
+    if (sourceDiagramPaneId) {
+      const sourcePaneIds = diagramPanes
+        .filter((pane) => pane.paneId === sourceDiagramPaneId)
+        .map((pane) => pane.paneId);
+      if (sourcePaneIds.length > 0) candidateGroups.push(new Set(sourcePaneIds));
+    }
+
+    const sourceDocumentPaneIds = diagramPanes
+      .filter((pane) => pane.sourceDocumentId === normalizedDocumentId)
+      .map((pane) => pane.paneId);
+    if (sourceDocumentPaneIds.length > 0) candidateGroups.push(new Set(sourceDocumentPaneIds));
+
+    if (candidateGroups.length === 0 && diagramPanes.length === 1) {
+      candidateGroups.push(new Set([diagramPanes[0].paneId]));
+    }
+
+    return candidateGroups;
+  }
+
+  function resolveStackingConflicts(conflictIds) {
+    const conflictIdSet = new Set(conflictIds);
+    const conflictsToResolve = stackingConflicts.filter((conflict) => conflictIdSet.has(conflict.id));
+    if (conflictsToResolve.length === 0) return;
+
+    const conflictsByDocument = new Map();
+    for (const conflict of conflictsToResolve) {
+      const documentId = conflict.documentId || DEFAULT_TABLE_DOCUMENT_ID;
+      const documentConflicts = conflictsByDocument.get(documentId) ?? [];
+      documentConflicts.push(conflict);
+      conflictsByDocument.set(documentId, documentConflicts);
+    }
+
+    const nextDocumentsById = new Map();
+    let changed = false;
+    let rowsChanged = false;
+
+    for (const [documentId, documentConflicts] of conflictsByDocument) {
+      const tableDocument = getTableDocument(documentId);
+      const floorIdsByItemId = new Map();
+      const nextRows = tableDocument.draftRows.map((row) => {
+        let matchingConflict = null;
+        for (let index = documentConflicts.length - 1; index >= 0; index -= 1) {
+          const conflict = documentConflicts[index];
+          if (conflict.rowIds.includes(row.id) && !doFloorValuesMatch(row.floor, conflict.targetFloorValue)) {
+            matchingConflict = conflict;
+            break;
+          }
+        }
+        if (!matchingConflict) return row;
+
+        const targetFloorId = getFloorIdForStackingValue(
+          matchingConflict.targetFloorValue,
+          matchingConflict.targetFloorKey || `floor-${matchingConflict.targetFloorValue}`,
+        );
+        floorIdsByItemId.set(String(row.id), targetFloorId);
+        return { ...row, floor: matchingConflict.targetFloorValue };
+      });
+
+      const floorResult = updateProgramDataFloorAssignments(tableDocument.programData, floorIdsByItemId, "spreadsheet");
+      const didRowsChange = nextRows.some((row, index) => row !== tableDocument.draftRows[index]);
+      if (didRowsChange || floorResult.changed) {
+        changed = true;
+        rowsChanged = rowsChanged || didRowsChange;
+        nextDocumentsById.set(documentId, {
+          ...tableDocument,
+          programData: floorResult.changed ? floorResult.data : tableDocument.programData,
+          draftRows: nextRows,
+          isDirty: true,
+        });
+      }
+    }
+
+    if (rowsChanged) pushTableHistorySnapshot();
+
+    if (changed) {
+      setTableDocuments((documents) => ({
+        ...documents,
+        ...Object.fromEntries(nextDocumentsById),
+      }));
+
+      const defaultDocument = nextDocumentsById.get(DEFAULT_TABLE_DOCUMENT_ID);
+      if (defaultDocument) {
+        setProgramData(defaultDocument.programData);
+        setDraftRows(defaultDocument.draftRows);
+      }
+    }
+
+    setStackingConflicts((conflicts) => {
+      let nextConflicts = conflicts;
+      for (const [documentId, nextDocument] of nextDocumentsById) {
+        nextConflicts = mergeStackingConflictsForDocument(nextConflicts, documentId, nextDocument);
+      }
+      return nextConflicts.filter((conflict) => !conflictIdSet.has(conflict.id));
+    });
+    setActiveConflictCellKey(null);
+    setConflictMenu(null);
+    setFooterConflictMenuPaneId(null);
+  }
+
+  function ignoreStackingConflict(conflictId) {
+    setStackingConflicts((conflicts) =>
+      conflicts.map((conflict) =>
+        conflict.id === conflictId
+          ? {
+              ...conflict,
+              status: "ignored",
+            }
+          : conflict,
+      ),
+    );
+    setActiveConflictCellKey(null);
+    setConflictMenu(null);
+    setFooterConflictMenuPaneId(null);
+  }
+
+  function ignoreStackingConflicts(conflictIds) {
+    const conflictIdSet = new Set(conflictIds);
+    if (conflictIdSet.size === 0) return;
+
+    setStackingConflicts((conflicts) =>
+      conflicts.map((conflict) =>
+        conflictIdSet.has(conflict.id)
+          ? {
+              ...conflict,
+              status: "ignored",
+            }
+          : conflict,
+      ),
+    );
+    setActiveConflictCellKey(null);
+    setConflictMenu(null);
+    setFooterConflictMenuPaneId(null);
+  }
+
+  function reconcileStackingConflictsForCell(documentId, rowId, columnKey, value) {
+    if (columnKey !== "floor") return;
+
+    const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
+    setStackingConflicts((conflicts) =>
+      conflicts
+        .map((conflict) => {
+          if (conflict.documentId !== normalizedDocumentId || !conflict.rowIds.includes(rowId)) return conflict;
+          if (!doFloorValuesMatch(value, conflict.targetFloorValue)) return conflict;
+
+          return {
+            ...conflict,
+            rowIds: conflict.rowIds.filter((conflictRowId) => conflictRowId !== rowId),
+          };
+        })
+        .filter((conflict) => conflict.rowIds.length > 0),
+    );
+  }
+
+  function handleStackingConflictCellInteraction(documentId, rowId, columnKey) {
+    const conflict = getStackingConflictForCell(documentId, rowId, columnKey);
+    if (!conflict) return;
+    setActiveConflictCellKey(getDocumentCellKey(documentId, rowId, columnKey));
+    setConflictMenu(null);
+  }
+
+  function getStackingConflictForCell(documentId, rowId, columnKey) {
+    const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
+    return stackingConflicts.find(
+      (conflict) =>
+        conflict.documentId === normalizedDocumentId &&
+        conflict.columnKey === columnKey &&
+        conflict.rowIds.includes(rowId),
+    ) ?? null;
+  }
+
+  function getVisibleStackingConflictAnchorCellKeys(documentId, visibleRows) {
+    const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
+    const visibleRowIds = visibleRows.map(({ row }) => row.id);
+    const anchorKeys = new Set();
+
+    for (const conflict of stackingConflicts) {
+      if (conflict.documentId !== normalizedDocumentId) continue;
+
+      const activeRowId = conflict.rowIds.find(
+        (rowId) => getDocumentCellKey(normalizedDocumentId, rowId, conflict.columnKey) === activeConflictCellKey,
+      );
+      if (activeRowId && visibleRowIds.includes(activeRowId)) {
+        anchorKeys.add(getDocumentCellKey(normalizedDocumentId, activeRowId, conflict.columnKey));
+        continue;
+      }
+
+      if (conflict.status === "ignored") continue;
+
+      const visibleRowId = visibleRowIds.find((rowId) => conflict.rowIds.includes(rowId));
+      if (visibleRowId) anchorKeys.add(getDocumentCellKey(normalizedDocumentId, visibleRowId, conflict.columnKey));
+    }
+
+    return anchorKeys;
+  }
+
+  function getTableRowsForDisplay(documentId, tableDocument, paneSortConfig = null, paneAdvancedSortConfig = null) {
+    if (tableDocument.draftRows.length > 0) {
+      return sortRows(tableDocument.draftRows, paneSortConfig, paneAdvancedSortConfig);
+    }
+
+    const blankValuesByRowId = blankSpreadsheetCellValues[documentId] ?? {};
+    return createBlankSpreadsheetRows().map((row) => ({
+      ...row,
+      ...(blankValuesByRowId[row.id] ?? {}),
+    }));
+  }
+
+  function getTableColumnWidth(columnKey) {
+    return tableColumnWidths[columnKey] ?? allTableColumns.find((column) => column.key === columnKey)?.width ?? DEFAULT_TABLE_COLUMN_WIDTH;
+  }
+
+  function getTableColumnStyle(columnKey) {
+    const width = getTableColumnWidth(columnKey);
+    return {
+      width: `${width}px`,
+      minWidth: `${width}px`,
+    };
+  }
+
+  function getTableRowHeight(rowId) {
+    return tableRowHeights[rowId] ?? DEFAULT_TABLE_ROW_HEIGHT;
+  }
+
+  function getRenderedTableRowHeight(rowId) {
+    return getTableRowHeight(rowId) + TABLE_GRID_LINE_WIDTH;
+  }
+
+  function getRenderedTableHeaderHeight() {
+    return TABLE_HEADER_HEIGHT + TABLE_GRID_LINE_WIDTH;
+  }
+
+  function getProgramTableMinWidth() {
+    return `${TABLE_ROW_NUMBER_COLUMN_WIDTH + columns.reduce((sum, column) => sum + getTableColumnWidth(column.key), 0)}px`;
+  }
+
+  function getPaneTableMinWidth(paneColumns = columns) {
+    return `${TABLE_ROW_NUMBER_COLUMN_WIDTH + paneColumns.reduce((sum, column) => sum + getTableColumnWidth(column.key), 0)}px`;
+  }
+
+  function getHierarchicalTableMinWidth(tableColumns = HIERARCHICAL_SPREADSHEET_COLUMNS) {
+    return `${tableColumns.reduce((sum, column) => sum + getTableColumnWidth(column.key), 0)}px`;
+  }
+
+  function startTableColumnResize(event, columnKey) {
+    event.preventDefault();
+    event.stopPropagation();
+    setTableGridResizeState({
+      type: "column",
+      columnKey,
+      startClientX: event.clientX,
+      startWidth: getTableColumnWidth(columnKey),
+      historySnapshot: createTableHistorySnapshot(),
+    });
+  }
+
+  function startTableRowResize(event, rowId) {
+    event.preventDefault();
+    event.stopPropagation();
+    setTableGridResizeState({
+      type: "row",
+      rowId,
+      startClientY: event.clientY,
+      startHeight: getTableRowHeight(rowId),
+      historySnapshot: createTableHistorySnapshot(),
+    });
+  }
+
+  function startSelectedTableCellEdit(replacementValue) {
+    const selectedCells = getActiveTableSelectedCells();
+    if (selectedCells.length !== 1) return;
+
+    const cell = parseCellKey(selectedCells[0]);
+    if (!cell) return;
+
+    startTableCellEdit(cell.rowId, cell.columnKey, activeTablePaneId ?? null, { replacementValue });
+  }
+
+  function startTableCellEdit(rowId, columnKey, paneId, { replacementValue } = {}) {
+    const documentId = paneId ? getTablePaneDocumentId(paneId) : DEFAULT_TABLE_DOCUMENT_ID;
+    const tableDocument = getTableDocument(documentId);
+    if (!isEditableTableCell(columnKey, tableDocument)) return;
+
+    const row = getTableRowsForDisplay(documentId, tableDocument).find((draftRow) => draftRow.id === rowId);
+    if (!row) return;
+
+    const originalValue = String(row[columnKey] ?? "");
+    setEditingTableCell({
+      paneId: paneId ?? null,
+      documentId,
+      rowId,
+      columnKey,
+      originalValue,
+    });
+
+    if (replacementValue !== undefined) {
+      updateRow(rowId, columnKey, replacementValue, documentId);
+    }
+  }
+
+  function finishTableCellEdit() {
+    setEditingTableCell(null);
+  }
+
+  function commitTableCellEditAndMove(rowDelta, columnDelta) {
+    if (!editingTableCell) return;
+
+    const { paneId, rowId, columnKey } = editingTableCell;
+    setEditingTableCell(null);
+    blurActiveTableInput();
+    moveTableSelectionFromCell(paneId, rowId, columnKey, rowDelta, columnDelta);
+  }
+
+  function cancelTableCellEdit() {
+    if (!editingTableCell) return;
+
+    updateRow(
+      editingTableCell.rowId,
+      editingTableCell.columnKey,
+      editingTableCell.originalValue,
+      editingTableCell.documentId,
+      { recordHistory: false },
+    );
+    setEditingTableCell(null);
+    blurActiveTableInput();
+  }
+
+  function handleActiveTableShortcut(event, activeSelectedCells) {
+    const key = event.key;
+    const normalizedKey = key.toLowerCase();
+    const isCommandKey = event.ctrlKey || event.metaKey;
+
+    if (isCommandKey && !event.altKey && normalizedKey === "z") {
+      event.preventDefault();
+      if (event.shiftKey) {
+        redoTableAction();
+      } else {
+        undoTableAction();
+      }
+      return true;
+    }
+
+    if (isCommandKey && !event.altKey && normalizedKey === "a") {
+      event.preventDefault();
+      selectAllActiveTableCells();
+      return true;
+    }
+
+    if (isCommandKey && !event.altKey && normalizedKey === "c" && activeSelectedCells.length > 0) {
+      event.preventDefault();
+      copyActiveTableSelectionToClipboard();
+      return true;
+    }
+
+    if (isCommandKey && !event.altKey && normalizedKey === "x" && activeSelectedCells.length > 0) {
+      event.preventDefault();
+      copyActiveTableSelectionToClipboard({ cut: true });
+      return true;
+    }
+
+    if (isCommandKey && !event.altKey && normalizedKey === "v") {
+      event.preventDefault();
+      pasteClipboardIntoActiveTableSelection();
+      return true;
+    }
+
+    if ((key === "Delete" || key === "Backspace") && activeSelectedCells.length > 0) {
+      event.preventDefault();
+      clearActiveTableCellContents();
+      return true;
+    }
+
+    if (key === "F2" && activeSelectedCells.length === 1) {
+      event.preventDefault();
+      startSelectedTableCellEdit();
+      return true;
+    }
+
+    if (key === "Enter") {
+      event.preventDefault();
+      moveActiveTableSelection(event.shiftKey ? -1 : 1, 0);
+      return true;
+    }
+
+    if (key === "Tab") {
+      event.preventDefault();
+      moveActiveTableSelection(0, event.shiftKey ? -1 : 1);
+      return true;
+    }
+
+    if (key === "ArrowUp" || key === "ArrowDown" || key === "ArrowLeft" || key === "ArrowRight") {
+      event.preventDefault();
+      const rowDelta = key === "ArrowUp" ? -1 : key === "ArrowDown" ? 1 : 0;
+      const columnDelta = key === "ArrowLeft" ? -1 : key === "ArrowRight" ? 1 : 0;
+      moveActiveTableSelection(rowDelta, columnDelta, { extend: event.shiftKey });
+      return true;
+    }
+
+    if (key === "Home" || key === "End") {
+      event.preventDefault();
+      moveActiveTableSelectionToEdge(key === "Home" ? "start" : "end", {
+        extend: event.shiftKey,
+        includeRows: isCommandKey,
+      });
+      return true;
+    }
+
+    return false;
+  }
+
+  function handleTableCellInputBlur(rowId, columnKey, paneId) {
+    if (isTableCellEditing(paneId, rowId, columnKey)) {
+      finishTableCellEdit();
+    }
+  }
+
+  function handleTableCellDoubleClick(event, rowId, columnKey, paneId) {
+    if (isTableCellEditing(paneId, rowId, columnKey)) return;
+
+    const documentId = paneId ? getTablePaneDocumentId(paneId) : DEFAULT_TABLE_DOCUMENT_ID;
+    const tableDocument = getTableDocument(documentId);
+    if (!isEditableTableCell(columnKey, tableDocument)) return;
+
+    event.preventDefault();
+    selectSingleTableCell(rowId, columnKey, paneId);
+    startTableCellEdit(rowId, columnKey, paneId);
+  }
+
+  function shouldStartSelectedTableCellEdit(event, activeSelectedCells) {
+    if (activeSelectedCells.length !== 1) return false;
+    if (event.ctrlKey || event.metaKey || event.altKey) return false;
+    if (openSpreadsheetTitlePaneId || columnMenu || isProjectMenuOpen) return false;
+    if (!isPrintableTableEditKey(event)) return false;
+    if (isEventFromTextEditingTarget(event)) return false;
+
+    const cell = parseCellKey(activeSelectedCells[0]);
+    const context = getTableNavigationContext();
+    return Boolean(cell && isEditableTableCell(cell.columnKey, context.tableDocument));
+  }
+
+  function isTableCellEditing(paneId, rowId, columnKey) {
+    return Boolean(
+      editingTableCell &&
+        (editingTableCell.paneId ?? null) === (paneId ?? null) &&
+        editingTableCell.rowId === rowId &&
+        editingTableCell.columnKey === columnKey
+    );
+  }
+
+  function getTableNavigationContext(paneId = activeTablePaneId ?? null) {
+    const tableState = paneId
+      ? getTablePaneStateById(paneId)
+      : {
+          documentId: DEFAULT_TABLE_DOCUMENT_ID,
+          sortConfig,
+          advancedSortConfig,
+          selectedCells: selectedTableCells,
+          selectionRanges: selectedTableRanges,
+          selectionAnchor: tableSelectionAnchor,
+        };
+    const documentId = tableState.documentId ?? DEFAULT_TABLE_DOCUMENT_ID;
+    const tableDocument = getTableDocument(documentId);
+    const rows = getTableRowsForDisplay(
+      documentId,
+      tableDocument,
+      tableState.sortConfig ?? null,
+      tableState.advancedSortConfig ?? null,
+    );
+    const tableColumns = getTableColumnsForDocument(tableDocument, spreadsheetSettings);
+
+    const columnIndexByKey = new Map(tableColumns.map((column, index) => [column.key, index]));
+    const rowIndexById = new Map(rows.map((row, index) => [row.id, index]));
+    const selectionRanges = getSelectionRangesFromState(tableState);
+
+    return {
+      paneId,
+      documentId,
+      tableDocument,
+      columns: tableColumns,
+      columnIndexByKey,
+      rows,
+      rowIndexById,
+      selectionRanges,
+      selectedCells: getCellKeysInSelectionRanges(selectionRanges, rowIndexById, rows, tableColumns),
+      selectionAnchor: tableState.selectionAnchor ?? null,
+    };
+  }
+
+  function getNavigationCell(context) {
+    if (context.selectionAnchor && context.rowIndexById.has(context.selectionAnchor.rowId)) {
+      return context.selectionAnchor;
+    }
+
+    const selectedCell = parseCellKey(context.selectedCells[0]);
+    if (selectedCell && context.rowIndexById.has(selectedCell.rowId)) return selectedCell;
+
+    const firstRow = context.rows[0];
+    const firstColumn = context.columns[0];
+    return firstRow && firstColumn ? { rowId: firstRow.id, columnKey: firstColumn.key } : null;
+  }
+
+  function moveActiveTableSelection(rowDelta, columnDelta, { extend = false } = {}) {
+    const context = getTableNavigationContext();
+    const currentCell = getNavigationCell(context);
+    if (!currentCell) return;
+
+    moveTableSelectionFromCell(context.paneId, currentCell.rowId, currentCell.columnKey, rowDelta, columnDelta, { extend });
+  }
+
+  function moveTableSelectionFromCell(paneId, rowId, columnKey, rowDelta, columnDelta, { extend = false } = {}) {
+    const context = getTableNavigationContext(paneId);
+    const currentRowIndex = context.rowIndexById.get(rowId);
+    const currentColumnIndex = context.columnIndexByKey.get(columnKey);
+    if (currentRowIndex === undefined || currentColumnIndex === undefined) return;
+
+    selectTableCellAtPosition(context, currentRowIndex + rowDelta, currentColumnIndex + columnDelta, {
+      extend,
+      anchor: context.selectionAnchor ?? { rowId, columnKey },
+    });
+  }
+
+  function moveActiveTableSelectionToEdge(edge, { extend = false, includeRows = false } = {}) {
+    const context = getTableNavigationContext();
+    const currentCell = getNavigationCell(context);
+    if (!currentCell) return;
+
+    const currentRowIndex = context.rowIndexById.get(currentCell.rowId);
+    const currentColumnIndex = context.columnIndexByKey.get(currentCell.columnKey);
+    if (currentRowIndex === undefined || currentColumnIndex === undefined) return;
+
+    selectTableCellAtPosition(
+      context,
+      includeRows ? (edge === "start" ? 0 : context.rows.length - 1) : currentRowIndex,
+      edge === "start" ? 0 : context.columns.length - 1,
+      {
+        extend,
+        anchor: context.selectionAnchor ?? currentCell,
+      },
+    );
+  }
+
+  function selectTableCellAtPosition(context, rowIndex, columnIndex, { extend = false, anchor = null } = {}) {
+    const nextRowIndex = clamp(rowIndex, 0, context.rows.length - 1);
+    const nextColumnIndex = clamp(columnIndex, 0, context.columns.length - 1);
+    const row = context.rows[nextRowIndex];
+    const column = context.columns[nextColumnIndex];
+    if (!row || !column) return;
+
+    const nextCell = { rowId: row.id, columnKey: column.key };
+    const nextAnchor = extend ? anchor ?? nextCell : nextCell;
+    updateTablePaneState(context.paneId, (state) => ({
+      ...state,
+      selectedCells: [],
+      selectionRanges: [createSelectionRange(nextAnchor, nextCell)],
+      selectionAnchor: nextAnchor,
+    }));
+    if (context.paneId) setActiveTablePaneId(context.paneId);
+    scrollTableCellIntoView(context.paneId, nextCell.rowId, nextCell.columnKey);
+  }
+
+  function selectAllActiveTableCells() {
+    const context = getTableNavigationContext();
+    if (context.rows.length === 0) return;
+
+    updateTablePaneState(context.paneId, (state) => ({
+      ...state,
+      selectedCells: [],
+      selectionRanges: [
+        createSelectionRange(
+          { rowId: context.rows[0].id, columnKey: context.columns[0].key },
+          {
+            rowId: context.rows[context.rows.length - 1].id,
+            columnKey: context.columns[context.columns.length - 1].key,
+          },
+        ),
+      ],
+      selectionAnchor: { rowId: context.rows[0].id, columnKey: context.columns[0].key },
+    }));
+  }
+
+  function clearActiveTableCellContents() {
+    const context = getTableNavigationContext();
+    if (context.selectedCells.length === 0) return;
+
+    const updatesByRowId = new Map();
+    for (const cellKey of context.selectedCells) {
+      const cell = parseCellKey(cellKey);
+      if (!cell || !isEditableTableCell(cell.columnKey, context.tableDocument)) continue;
+
+      const rowUpdates = updatesByRowId.get(cell.rowId) ?? {};
+      rowUpdates[cell.columnKey] = "";
+      updatesByRowId.set(cell.rowId, rowUpdates);
+    }
+
+    applyTableCellUpdates(context, updatesByRowId);
+  }
+
+  function copyActiveTableSelectionToClipboard({ cut = false } = {}) {
+    const text = getActiveTableSelectionText();
+    if (!text) return;
+
+    writeTextToClipboard(text)
+      .then(() => {
+        if (cut) clearActiveTableCellContents();
+      })
+      .catch((error) => console.warn(error));
+  }
+
+  function pasteClipboardIntoActiveTableSelection() {
+    readTextFromClipboard()
+      .then((text) => pasteTextIntoActiveTableSelection(text))
+      .catch((error) => console.warn(error));
+  }
+
+  function getActiveTableSelectionText() {
+    const context = getTableNavigationContext();
+    if (context.selectedCells.length === 0) return "";
+
+    const selectedSet = new Set(context.selectedCells);
+    const selectedPositions = context.selectedCells
+      .map(parseCellKey)
+      .filter(Boolean)
+      .map((cell) => ({
+        rowIndex: context.rowIndexById.get(cell.rowId),
+        columnIndex: context.columnIndexByKey.get(cell.columnKey),
+      }))
+      .filter((position) => position.rowIndex !== undefined && position.columnIndex !== undefined);
+
+    if (selectedPositions.length === 0) return "";
+
+    const minRowIndex = Math.min(...selectedPositions.map((position) => position.rowIndex));
+    const maxRowIndex = Math.max(...selectedPositions.map((position) => position.rowIndex));
+    const minColumnIndex = Math.min(...selectedPositions.map((position) => position.columnIndex));
+    const maxColumnIndex = Math.max(...selectedPositions.map((position) => position.columnIndex));
+    const lines = [];
+
+    for (let rowIndex = minRowIndex; rowIndex <= maxRowIndex; rowIndex += 1) {
+      const row = context.rows[rowIndex];
+      const values = [];
+
+      for (let columnIndex = minColumnIndex; columnIndex <= maxColumnIndex; columnIndex += 1) {
+        const column = context.columns[columnIndex];
+        if (!row || !column || !selectedSet.has(getCellKey(row.id, column.key))) {
+          values.push("");
+        } else if (column.key === "totalNsf" && context.tableDocument.draftRows.length > 0) {
+          values.push(String(formatArea(computeTotalNsf(row.quantity, row.nsfPerUnit))));
+        } else {
+          values.push(String(row[column.key] ?? ""));
+        }
+      }
+
+      lines.push(values.join("\t"));
+    }
+
+    return lines.join("\n");
+  }
+
+  function pasteTextIntoActiveTableSelection(text) {
+    const values = parseClipboardTableText(text);
+    if (values.length === 0) return;
+
+    const context = getTableNavigationContext();
+    const startCell = getNavigationCell(context);
+    if (!startCell) return;
+
+    if (values.length === 1 && values[0].length === 1 && context.selectedCells.length > 1) {
+      fillSelectedTableCells(context, values[0][0]);
+      return;
+    }
+
+    const startRowIndex = context.rowIndexById.get(startCell.rowId);
+    const startColumnIndex = context.columnIndexByKey.get(startCell.columnKey);
+    if (startRowIndex === undefined || startColumnIndex === undefined) return;
+
+    const updatesByRowId = new Map();
+    let lastRowIndex = startRowIndex;
+    let lastColumnIndex = startColumnIndex;
+
+    for (let rowOffset = 0; rowOffset < values.length; rowOffset += 1) {
+      const row = context.rows[startRowIndex + rowOffset];
+      if (!row) break;
+
+      for (let columnOffset = 0; columnOffset < values[rowOffset].length; columnOffset += 1) {
+        const column = context.columns[startColumnIndex + columnOffset];
+        if (!column) break;
+
+        lastRowIndex = startRowIndex + rowOffset;
+        lastColumnIndex = startColumnIndex + columnOffset;
+        if (!isEditableTableCell(column.key, context.tableDocument)) continue;
+
+        const rowUpdates = updatesByRowId.get(row.id) ?? {};
+        rowUpdates[column.key] = values[rowOffset][columnOffset];
+        updatesByRowId.set(row.id, rowUpdates);
+      }
+    }
+
+    applyTableCellUpdates(context, updatesByRowId);
+
+    const endRow = context.rows[Math.min(lastRowIndex, context.rows.length - 1)];
+    const endColumn = context.columns[Math.min(lastColumnIndex, context.columns.length - 1)];
+    if (endRow && endColumn) {
+      updateTablePaneState(context.paneId, (state) => ({
+        ...state,
+        selectedCells: [],
+        selectionRanges: [createSelectionRange(startCell, { rowId: endRow.id, columnKey: endColumn.key })],
+        selectionAnchor: startCell,
+      }));
+      scrollTableCellIntoView(context.paneId, endRow.id, endColumn.key);
+    }
+  }
+
+  function fillSelectedTableCells(context, value) {
+    const updatesByRowId = new Map();
+
+    for (const cellKey of context.selectedCells) {
+      const cell = parseCellKey(cellKey);
+      if (!cell || !isEditableTableCell(cell.columnKey, context.tableDocument)) continue;
+
+      const rowUpdates = updatesByRowId.get(cell.rowId) ?? {};
+      rowUpdates[cell.columnKey] = value;
+      updatesByRowId.set(cell.rowId, rowUpdates);
+    }
+
+    applyTableCellUpdates(context, updatesByRowId);
+  }
+
+  function applyTableCellUpdates(context, updatesByRowId) {
+    if (updatesByRowId.size === 0) return;
+
+    if (context.tableDocument.draftRows.length === 0) {
+      const documentValues = blankSpreadsheetCellValues[context.documentId] ?? {};
+      const hasChanges = [...updatesByRowId.entries()].some(([rowId, rowUpdates]) =>
+        Object.entries(rowUpdates).some(([columnKey, value]) =>
+          String(documentValues[rowId]?.[columnKey] ?? "") !== String(value ?? ""),
+        ),
+      );
+      if (!hasChanges) return;
+
+      pushTableHistorySnapshot();
+      setBlankSpreadsheetCellValues((values) => {
+        const documentValues = values[context.documentId] ?? {};
+        const nextDocumentValues = { ...documentValues };
+
+        for (const [rowId, rowUpdates] of updatesByRowId.entries()) {
+          nextDocumentValues[rowId] = {
+            ...(nextDocumentValues[rowId] ?? {}),
+            ...rowUpdates,
+          };
+        }
+
+        return {
+          ...values,
+          [context.documentId]: nextDocumentValues,
+        };
+      });
+      return;
+    }
+
+    const rowsById = new Map(context.tableDocument.draftRows.map((row) => [row.id, row]));
+    const hasChanges = [...updatesByRowId.entries()].some(([rowId, rowUpdates]) => {
+      const row = rowsById.get(rowId);
+      return Object.entries(rowUpdates).some(([columnKey, value]) => String(row?.[columnKey] ?? "") !== String(value ?? ""));
+    });
+    if (!hasChanges) return;
+
+    pushTableHistorySnapshot();
+    updateTableDocument(context.documentId, (tableDocument) => ({
+      ...tableDocument,
+      draftRows: tableDocument.draftRows.map((row) => (
+        updatesByRowId.has(row.id) ? { ...row, ...updatesByRowId.get(row.id) } : row
+      )),
     }));
   }
 
   function clearTableSelection() {
     setSelectedTableCells([]);
+    setSelectedTableRanges([]);
     setTableSelectionAnchor(null);
     setWorkspaceSlots((slots) =>
       slots.map((slot) => (
@@ -1026,6 +3317,7 @@ export default function App() {
               tableState: {
                 ...(slot.tableState ?? createDefaultTablePaneState()),
                 selectedCells: [],
+                selectionRanges: [],
                 selectionAnchor: null,
               },
             }
@@ -1042,17 +3334,18 @@ export default function App() {
     updateTablePaneState(activeTablePaneId, (state) => ({
       ...state,
       selectedCells: [],
+      selectionRanges: [],
       selectionAnchor: null,
     }));
   }
 
   function selectSingleTableCell(rowId, columnKey, paneId) {
     const cell = { rowId, columnKey };
-    const selectedCells = [getCellKey(rowId, columnKey)];
     if (paneId) setActiveTablePaneId(paneId);
     updateTablePaneState(paneId, (state) => ({
       ...state,
-      selectedCells,
+      selectedCells: [],
+      selectionRanges: [createSelectionRange(cell)],
       selectionAnchor: cell,
     }));
   }
@@ -1062,50 +3355,235 @@ export default function App() {
     rowId,
     columnKey,
     paneId,
-    paneSelectedCells = selectedTableCells,
+    paneSelectionRanges = selectedTableRanges,
     paneSelectionAnchor = tableSelectionAnchor,
     paneVisibleRowIndexById = visibleRowIndexById,
     paneSortedRows = sortedRows,
+    paneColumns = columns,
   ) {
     if (event.button !== 0) return;
+    if (isTableCellEditing(paneId, rowId, columnKey)) return;
+
+    event.preventDefault();
+    blurActiveElement();
+    if (editingTableCell) finishTableCellEdit();
     if (paneId) setActiveTablePaneId(paneId);
+    handleStackingConflictCellInteraction(paneId ? getTablePaneDocumentId(paneId) : DEFAULT_TABLE_DOCUMENT_ID, rowId, columnKey);
 
     const cell = { rowId, columnKey };
     const cellKey = getCellKey(rowId, columnKey);
 
     if (event.shiftKey) {
-      event.preventDefault();
       blurActiveTableInput();
       const anchor = paneSelectionAnchor ?? cell;
       updateTablePaneState(paneId, (state) => ({
         ...state,
-        selectedCells: getCellKeysInRange(anchor, cell, paneVisibleRowIndexById, paneSortedRows),
+        selectedCells: [],
+        selectionRanges: [createSelectionRange(anchor, cell)],
         selectionAnchor: paneSelectionAnchor ?? cell,
       }));
       return;
     }
 
     if (event.ctrlKey || event.metaKey) {
-      event.preventDefault();
       blurActiveTableInput();
+      const paneSelectedCells = getCellKeysInSelectionRanges(paneSelectionRanges, paneVisibleRowIndexById, paneSortedRows, paneColumns);
       updateTablePaneState(paneId, (state) => ({
         ...state,
-        selectedCells: paneSelectedCells.includes(cellKey)
-          ? paneSelectedCells.filter((key) => key !== cellKey)
-          : [...paneSelectedCells, cellKey],
+        selectedCells: [],
+        selectionRanges: getSelectionRangesFromCellKeys(
+          paneSelectedCells.includes(cellKey)
+            ? paneSelectedCells.filter((key) => key !== cellKey)
+            : [...paneSelectedCells, cellKey],
+        ),
         selectionAnchor: cell,
       }));
       return;
     }
 
     selectSingleTableCell(rowId, columnKey, paneId);
+    setTableSelectionDragState({
+      paneId: paneId ?? null,
+      anchor: cell,
+    });
   }
 
-  function getCellKeysInRange(startCell, endCell, rowIndexById = visibleRowIndexById, rows = sortedRows) {
+  function handleTableCellMouseEnter(rowId, columnKey, paneId, paneVisibleRowIndexById, paneSortedRows, paneColumns) {
+    if (!tableSelectionDragState) return;
+    if ((paneId ?? null) !== (tableSelectionDragState.paneId ?? null)) return;
+
+    const nextCell = { rowId, columnKey };
+    updateTablePaneState(paneId, (state) => ({
+      ...state,
+      selectedCells: [],
+      selectionRanges: [createSelectionRange(tableSelectionDragState.anchor, nextCell)],
+      selectionAnchor: tableSelectionDragState.anchor,
+    }));
+  }
+
+  function handleTableRowHeaderMouseDown(
+    event,
+    rowId,
+    paneId,
+    paneSelectionRanges = selectedTableRanges,
+    paneSelectionAnchor = tableSelectionAnchor,
+    paneVisibleRowIndexById = visibleRowIndexById,
+    paneSortedRows = sortedRows,
+    paneColumns = columns,
+  ) {
+    if (event.button !== 0) return;
+
+    event.preventDefault();
+    blurActiveElement();
+    if (editingTableCell) finishTableCellEdit();
+    if (paneId) setActiveTablePaneId(paneId);
+
+    const rowKeys = paneColumns.map((column) => getCellKey(rowId, column.key));
+    const paneSelectedCells = getCellKeysInSelectionRanges(paneSelectionRanges, paneVisibleRowIndexById, paneSortedRows, paneColumns);
+    const selectedSet = new Set(paneSelectedCells);
+
+    if (event.shiftKey) {
+      const anchor = paneSelectionAnchor ?? { rowId, columnKey: paneColumns[0].key };
+      const anchorRowIndex = paneVisibleRowIndexById.get(anchor.rowId);
+      const rowIndex = paneVisibleRowIndexById.get(rowId);
+
+      if (anchorRowIndex !== undefined && rowIndex !== undefined) {
+        const firstRowIndex = Math.min(anchorRowIndex, rowIndex);
+        const lastRowIndex = Math.max(anchorRowIndex, rowIndex);
+        const firstSelectedRow = paneSortedRows[firstRowIndex];
+        const lastSelectedRow = paneSortedRows[lastRowIndex];
+
+        updateTablePaneState(paneId, (state) => ({
+          ...state,
+          selectedCells: [],
+          selectionRanges:
+            firstSelectedRow && lastSelectedRow
+              ? [
+                  createSelectionRange(
+                    { rowId: firstSelectedRow.id, columnKey: paneColumns[0]?.key },
+                    { rowId: lastSelectedRow.id, columnKey: paneColumns[paneColumns.length - 1]?.key },
+                  ),
+                ]
+              : [],
+          selectionAnchor: { rowId: anchor.rowId, columnKey: paneColumns[0].key },
+        }));
+      }
+      return;
+    }
+
+    if (event.ctrlKey || event.metaKey) {
+      const shouldRemove = rowKeys.every((cellKey) => selectedSet.has(cellKey));
+      updateTablePaneState(paneId, (state) => ({
+        ...state,
+        selectedCells: [],
+        selectionRanges: getSelectionRangesFromCellKeys(
+          shouldRemove
+            ? paneSelectedCells.filter((cellKey) => !rowKeys.includes(cellKey))
+            : [...new Set([...paneSelectedCells, ...rowKeys])],
+        ),
+        selectionAnchor: { rowId, columnKey: paneColumns[0].key },
+      }));
+      return;
+    }
+
+    updateTablePaneState(paneId, (state) => ({
+      ...state,
+      selectedCells: [],
+      selectionRanges: [
+        createSelectionRange(
+          { rowId, columnKey: paneColumns[0]?.key },
+          { rowId, columnKey: paneColumns[paneColumns.length - 1]?.key },
+        ),
+      ],
+      selectionAnchor: { rowId, columnKey: paneColumns[0].key },
+    }));
+  }
+
+  function handleTableColumnHeaderMouseDown(
+    event,
+    columnKey,
+    paneId,
+    rows,
+    paneSelectionRanges = selectedTableRanges,
+    paneSelectionAnchor = tableSelectionAnchor,
+    paneColumns = columns,
+  ) {
+    if (event.type === "mousedown" && event.button !== 0) return;
+
+    event.preventDefault();
+    blurActiveElement();
+    if (editingTableCell) finishTableCellEdit();
+    if (paneId) setActiveTablePaneId(paneId);
+
+    const firstRow = rows[0];
+    const rowIndexById = new Map(rows.map((row, index) => [row.id, index]));
+    const columnKeys = rows.map((row) => getCellKey(row.id, columnKey));
+    const paneSelectedCells = getCellKeysInSelectionRanges(paneSelectionRanges, rowIndexById, rows, paneColumns);
+    const selectedSet = new Set(paneSelectedCells);
+
+    if (event.shiftKey) {
+      const anchorColumnKey = paneSelectionAnchor?.columnKey ?? columnKey;
+      const paneColumnIndexByKey = new Map(paneColumns.map((column, index) => [column.key, index]));
+      const anchorColumnIndex = paneColumnIndexByKey.get(anchorColumnKey);
+      const columnIndex = paneColumnIndexByKey.get(columnKey);
+
+      if (anchorColumnIndex !== undefined && columnIndex !== undefined) {
+        const firstColumnIndex = Math.min(anchorColumnIndex, columnIndex);
+        const lastColumnIndex = Math.max(anchorColumnIndex, columnIndex);
+
+        updateTablePaneState(paneId, (state) => ({
+          ...state,
+          selectedCells: [],
+          selectionRanges: firstRow
+            ? [
+                createSelectionRange(
+                  { rowId: firstRow.id, columnKey: paneColumns[firstColumnIndex]?.key },
+                  { rowId: rows[rows.length - 1]?.id, columnKey: paneColumns[lastColumnIndex]?.key },
+                ),
+              ]
+            : [],
+          selectionAnchor: firstRow ? { rowId: firstRow.id, columnKey: anchorColumnKey } : null,
+        }));
+      }
+      return;
+    }
+
+    if (event.ctrlKey || event.metaKey) {
+      const shouldRemove = columnKeys.every((cellKey) => selectedSet.has(cellKey));
+      updateTablePaneState(paneId, (state) => ({
+        ...state,
+        selectedCells: [],
+        selectionRanges: getSelectionRangesFromCellKeys(
+          shouldRemove
+            ? paneSelectedCells.filter((cellKey) => !columnKeys.includes(cellKey))
+            : [...new Set([...paneSelectedCells, ...columnKeys])],
+        ),
+        selectionAnchor: firstRow ? { rowId: firstRow.id, columnKey } : null,
+      }));
+      return;
+    }
+
+    updateTablePaneState(paneId, (state) => ({
+      ...state,
+      selectedCells: [],
+      selectionRanges: firstRow
+        ? [
+            createSelectionRange(
+              { rowId: firstRow.id, columnKey },
+              { rowId: rows[rows.length - 1]?.id, columnKey },
+            ),
+          ]
+        : [],
+      selectionAnchor: firstRow ? { rowId: firstRow.id, columnKey } : null,
+    }));
+  }
+
+  function getCellKeysInRange(startCell, endCell, rowIndexById = visibleRowIndexById, rows = sortedRows, tableColumns = columns) {
     const startRowIndex = rowIndexById.get(startCell.rowId);
     const endRowIndex = rowIndexById.get(endCell.rowId);
-    const startColumnIndex = columnIndexByKey.get(startCell.columnKey);
-    const endColumnIndex = columnIndexByKey.get(endCell.columnKey);
+    const tableColumnIndexByKey = new Map(tableColumns.map((column, index) => [column.key, index]));
+    const startColumnIndex = tableColumnIndexByKey.get(startCell.columnKey);
+    const endColumnIndex = tableColumnIndexByKey.get(endCell.columnKey);
 
     if (
       startRowIndex === undefined ||
@@ -1127,7 +3605,7 @@ export default function App() {
       if (!row) continue;
 
       for (let columnIndex = firstColumnIndex; columnIndex <= lastColumnIndex; columnIndex += 1) {
-        const column = columns[columnIndex];
+        const column = tableColumns[columnIndex];
         if (column) keys.push(getCellKey(row.id, column.key));
       }
     }
@@ -1135,33 +3613,182 @@ export default function App() {
     return keys;
   }
 
+  function createSelectionRange(startCell, endCell = startCell) {
+    if (!startCell?.rowId || !startCell?.columnKey || !endCell?.rowId || !endCell?.columnKey) return null;
+
+    return {
+      start: { rowId: startCell.rowId, columnKey: startCell.columnKey },
+      end: { rowId: endCell.rowId, columnKey: endCell.columnKey },
+    };
+  }
+
+  function getSelectionRangesFromState(state) {
+    const storedRanges = Array.isArray(state?.selectionRanges)
+      ? state.selectionRanges.map((range) => createSelectionRange(range?.start, range?.end)).filter(Boolean)
+      : [];
+    if (storedRanges.length > 0) return storedRanges;
+
+    return getSelectionRangesFromCellKeys(state?.selectedCells ?? []);
+  }
+
+  function getSelectionRangesFromCellKeys(cellKeys) {
+    return [...new Set(cellKeys)]
+      .map(parseCellKey)
+      .filter(Boolean)
+      .map((cell) => createSelectionRange(cell))
+      .filter(Boolean);
+  }
+
+  function getNormalizedSelectionRanges(selectionRanges, rowIndexById, columnIndexByKey) {
+    return selectionRanges
+      .map((range) => {
+        const startRowIndex = rowIndexById.get(range.start.rowId);
+        const endRowIndex = rowIndexById.get(range.end.rowId);
+        const startColumnIndex = columnIndexByKey.get(range.start.columnKey);
+        const endColumnIndex = columnIndexByKey.get(range.end.columnKey);
+        if (
+          startRowIndex === undefined ||
+          endRowIndex === undefined ||
+          startColumnIndex === undefined ||
+          endColumnIndex === undefined
+        ) {
+          return null;
+        }
+
+        return {
+          firstRowIndex: Math.min(startRowIndex, endRowIndex),
+          lastRowIndex: Math.max(startRowIndex, endRowIndex),
+          firstColumnIndex: Math.min(startColumnIndex, endColumnIndex),
+          lastColumnIndex: Math.max(startColumnIndex, endColumnIndex),
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function getCellKeysInSelectionRanges(selectionRanges, rowIndexById, rows, tableColumns) {
+    const columnIndexByKey = new Map(tableColumns.map((column, index) => [column.key, index]));
+    const normalizedRanges = getNormalizedSelectionRanges(selectionRanges, rowIndexById, columnIndexByKey);
+    const selectedKeys = new Set();
+
+    for (const range of normalizedRanges) {
+      for (let rowIndex = range.firstRowIndex; rowIndex <= range.lastRowIndex; rowIndex += 1) {
+        const row = rows[rowIndex];
+        if (!row) continue;
+
+        for (let columnIndex = range.firstColumnIndex; columnIndex <= range.lastColumnIndex; columnIndex += 1) {
+          const column = tableColumns[columnIndex];
+          if (column) selectedKeys.add(getCellKey(row.id, column.key));
+        }
+      }
+    }
+
+    return [...selectedKeys];
+  }
+
+  function isCellPositionSelected(rowIndex, columnIndex, normalizedSelectionRanges) {
+    return normalizedSelectionRanges.some(
+      (range) =>
+        rowIndex >= range.firstRowIndex &&
+        rowIndex <= range.lastRowIndex &&
+        columnIndex >= range.firstColumnIndex &&
+        columnIndex <= range.lastColumnIndex,
+    );
+  }
+
+  function getSelectionCellCount(normalizedSelectionRanges) {
+    return normalizedSelectionRanges.reduce(
+      (sum, range) =>
+        sum + (range.lastRowIndex - range.firstRowIndex + 1) * (range.lastColumnIndex - range.firstColumnIndex + 1),
+      0,
+    );
+  }
+
+  function getSelectedRowIdsFromRanges(normalizedSelectionRanges, rows) {
+    const rowIds = new Set();
+    for (const range of normalizedSelectionRanges) {
+      for (let rowIndex = range.firstRowIndex; rowIndex <= range.lastRowIndex; rowIndex += 1) {
+        const row = rows[rowIndex];
+        if (row) rowIds.add(row.id);
+      }
+    }
+    return rowIds;
+  }
+
+  function getSelectedColumnKeysFromRanges(normalizedSelectionRanges, tableColumns) {
+    const columnKeys = new Set();
+    for (const range of normalizedSelectionRanges) {
+      for (let columnIndex = range.firstColumnIndex; columnIndex <= range.lastColumnIndex; columnIndex += 1) {
+        const column = tableColumns[columnIndex];
+        if (column) columnKeys.add(column.key);
+      }
+    }
+    return columnKeys;
+  }
+
+  function getStackingConflictCellPositionSet(documentId, rows, tableColumns) {
+    const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
+    const rowIndexById = new Map(rows.map((row, index) => [row.id, index]));
+    const columnIndexByKey = new Map(tableColumns.map((column, index) => [column.key, index]));
+    const positions = new Set();
+
+    for (const conflict of stackingConflicts) {
+      if (conflict.documentId !== normalizedDocumentId || conflict.status !== "pending") continue;
+      const columnIndex = columnIndexByKey.get(conflict.columnKey);
+      if (columnIndex === undefined) continue;
+
+      for (const rowId of conflict.rowIds) {
+        const rowIndex = rowIndexById.get(rowId);
+        if (rowIndex !== undefined) positions.add(getTableCellPositionKey(rowIndex, columnIndex));
+      }
+    }
+
+    return positions;
+  }
+
+  function getTableCellPositionKey(rowIndex, columnIndex) {
+    return `${rowIndex}:${columnIndex}`;
+  }
+
+  function isTableCellPositionInSet(rowIndex, columnIndex, positionSet) {
+    return positionSet.has(getTableCellPositionKey(rowIndex, columnIndex));
+  }
+
+  function getStackingConflictEdgeClassName(rowIndex, columnIndex, positionSet) {
+    if (!isTableCellPositionInSet(rowIndex, columnIndex, positionSet)) return "";
+
+    const classes = [];
+    if (!isTableCellPositionInSet(rowIndex - 1, columnIndex, positionSet)) classes.push("conflict-edge-top");
+    if (!isTableCellPositionInSet(rowIndex, columnIndex + 1, positionSet)) classes.push("conflict-edge-right");
+    if (!isTableCellPositionInSet(rowIndex + 1, columnIndex, positionSet)) classes.push("conflict-edge-bottom");
+    if (!isTableCellPositionInSet(rowIndex, columnIndex - 1, positionSet)) classes.push("conflict-edge-left");
+    return classes.join(" ");
+  }
+
+  function getFirstSelectionCell(selectionRanges) {
+    return selectionRanges[0]?.start ?? null;
+  }
+
   function getTableCellClassName(
     rowId,
     columnKey,
-    paneSelectedCells = selectedTableCells,
-    paneSelectedCellSet = selectedTableCellSet,
-    paneVisibleRowIndexById = visibleRowIndexById,
-    paneSortedRows = sortedRows,
+    rowIndex,
+    columnIndex,
+    normalizedSelectionRanges,
+    selectionCellCount,
     paneCellStyles = cellStyles,
   ) {
     const cellKey = getCellKey(rowId, columnKey);
     const classes = [];
     const style = paneCellStyles[cellKey];
 
-    if (paneSelectedCellSet.has(cellKey)) {
+    if (isCellPositionSelected(rowIndex, columnIndex, normalizedSelectionRanges)) {
       classes.push("is-cell-selected");
-      if (paneSelectedCells.length > 1) classes.push("is-cell-multi-selected");
+      if (selectionCellCount > 1) classes.push("is-cell-multi-selected");
 
-      const rowIndex = paneVisibleRowIndexById.get(rowId);
-      const columnIndex = columnIndexByKey.get(columnKey);
-      if (rowIndex === undefined || columnIndex === undefined) {
-        classes.push("cell-edge-top", "cell-edge-right", "cell-edge-bottom", "cell-edge-left");
-      } else {
-        if (!isTableCellSelectedAt(rowIndex - 1, columnIndex, paneSortedRows, paneSelectedCellSet)) classes.push("cell-edge-top");
-        if (!isTableCellSelectedAt(rowIndex, columnIndex + 1, paneSortedRows, paneSelectedCellSet)) classes.push("cell-edge-right");
-        if (!isTableCellSelectedAt(rowIndex + 1, columnIndex, paneSortedRows, paneSelectedCellSet)) classes.push("cell-edge-bottom");
-        if (!isTableCellSelectedAt(rowIndex, columnIndex - 1, paneSortedRows, paneSelectedCellSet)) classes.push("cell-edge-left");
-      }
+      if (!isCellPositionSelected(rowIndex - 1, columnIndex, normalizedSelectionRanges)) classes.push("cell-edge-top");
+      if (!isCellPositionSelected(rowIndex, columnIndex + 1, normalizedSelectionRanges)) classes.push("cell-edge-right");
+      if (!isCellPositionSelected(rowIndex + 1, columnIndex, normalizedSelectionRanges)) classes.push("cell-edge-bottom");
+      if (!isCellPositionSelected(rowIndex, columnIndex - 1, normalizedSelectionRanges)) classes.push("cell-edge-left");
     }
 
     if (style?.bold) classes.push("is-cell-bold");
@@ -1171,10 +3798,44 @@ export default function App() {
     return classes.join(" ");
   }
 
-  function isTableCellSelectedAt(rowIndex, columnIndex, rows = sortedRows, selectedSet = selectedTableCellSet) {
-    const row = rows[rowIndex];
-    const column = columns[columnIndex];
-    return Boolean(row && column && selectedSet.has(getCellKey(row.id, column.key)));
+  function getVirtualTableRows(rows, viewportMetrics) {
+    if (rows.length === 0) {
+      return {
+        rows: [],
+        topSpacerHeight: 0,
+        bottomSpacerHeight: 0,
+      };
+    }
+
+    const bodyScrollTop = Math.max(0, (viewportMetrics?.scrollTop ?? 0) - getRenderedTableHeaderHeight());
+    const viewportHeight = viewportMetrics?.clientHeight ?? 720;
+    const rowHeights = rows.map((row) => getRenderedTableRowHeight(row.id));
+    const totalHeight = rowHeights.reduce((sum, height) => sum + height, 0);
+    const visibleTop = Math.max(0, bodyScrollTop - TABLE_VIRTUAL_OVERSCAN_ROWS * getRenderedTableRowHeight(undefined));
+    const visibleBottom = Math.min(
+      totalHeight,
+      bodyScrollTop + viewportHeight + TABLE_VIRTUAL_OVERSCAN_ROWS * getRenderedTableRowHeight(undefined),
+    );
+
+    let accumulatedHeight = 0;
+    let startIndex = 0;
+    while (startIndex < rowHeights.length && accumulatedHeight + rowHeights[startIndex] < visibleTop) {
+      accumulatedHeight += rowHeights[startIndex];
+      startIndex += 1;
+    }
+
+    let endIndex = startIndex;
+    let visibleHeight = accumulatedHeight;
+    while (endIndex < rowHeights.length && visibleHeight <= visibleBottom) {
+      visibleHeight += rowHeights[endIndex];
+      endIndex += 1;
+    }
+
+    return {
+      rows: rows.slice(startIndex, endIndex).map((row, offset) => ({ row, rowIndex: startIndex + offset })),
+      topSpacerHeight: accumulatedHeight,
+      bottomSpacerHeight: Math.max(0, totalHeight - visibleHeight),
+    };
   }
 
   function applyTableCellFormat(formatKey) {
@@ -1201,6 +3862,8 @@ export default function App() {
       }
     }
 
+    if (serializeCellStyles(nextStyles) === serializeCellStyles(currentCellStyles)) return;
+    pushTableHistorySnapshot();
     updateTableDocument(documentId, (tableDocument) => ({
       ...tableDocument,
       cellStyles: nextStyles,
@@ -1385,6 +4048,12 @@ export default function App() {
     setPendingTableClosePaneId(null);
     setSideToolMenu(null);
     if (paneId) {
+      clearActiveWorkspacePane(paneId);
+    } else {
+      setActiveWorkspacePane((currentPane) => (currentPane?.type === "table" ? null : currentPane));
+    }
+    if (!paneId || spreadsheetSettingsPaneId === paneId) setSpreadsheetSettingsPaneId(null);
+    if (paneId) {
       if (openSpreadsheetTitlePaneId === paneId) setOpenSpreadsheetTitlePaneId(null);
       if (activeTablePaneId === paneId) setActiveTablePaneId(null);
       if (advancedSortPaneId === paneId) closeAdvancedSortDialog();
@@ -1412,30 +4081,113 @@ export default function App() {
         tableDocument.draftRows,
         tableDocument.cellStyles,
         tableDocument.draftProjectName,
+        {
+          distributeIdenticalRooms: spreadsheetSettings.distributeIdenticalRooms,
+        },
       );
       const savedData = await putProgramData(nextData);
-      setTableDocumentFromData(documentId, savedData);
-      setStatusMessage("");
+      setTableDocumentFromData(documentId, savedData, { rebuildStackingConflicts: true });
+      setStatusMessage("Saved.");
       setIsExitConfirmOpen(false);
-      const nextSlots = paneId
-        ? workspaceSlots.filter((slot, index) => getWorkspacePaneId(slot, index) !== paneId)
-        : workspaceSlots.filter((slot) => getWorkspacePaneType(slot) !== "table");
-      const nextWidths = paneId ? getPaneWidthsWithoutPane(paneId) : createEqualPaneWidths(nextSlots.length);
-      setWorkspaceSlots(nextSlots);
-      setWorkspacePaneWidths(nextWidths);
-      syncWorkspaceToolFlags(nextSlots);
-      if (paneId) {
-        if (activeTablePaneId === paneId) setActiveTablePaneId(null);
-        if (advancedSortPaneId === paneId) closeAdvancedSortDialog();
-      } else {
-        clearTableSelection();
-      }
+      await refreshAvailableProgramDataFiles();
     } catch (error) {
       setErrorMessage(error.message);
     } finally {
       setIsSaving(false);
       setSavingTablePaneId(null);
     }
+  }
+
+  function openSpreadsheetSettings(paneId) {
+    setOpenSpreadsheetTitlePaneId(null);
+    setDraftSpreadsheetSettings(spreadsheetSettings);
+    setSpreadsheetSettingsPaneId(paneId);
+  }
+
+  function closeSpreadsheetSettings() {
+    setDraftSpreadsheetSettings(spreadsheetSettings);
+    setSpreadsheetSettingsPaneId(null);
+  }
+
+  function transformOpenTableDocumentsForIdenticalRooms(transformDocument, statusMessage) {
+    const documentIds = new Set(Object.keys(tableDocuments));
+    if (programData) documentIds.add(DEFAULT_TABLE_DOCUMENT_ID);
+
+    const tableSlots = workspaceSlots.length > 0 ? workspaceSlots : (isTableOpen ? ["table"] : []);
+    for (const [index, slot] of tableSlots.entries()) {
+      if (getWorkspacePaneType(slot) !== "table") continue;
+      const slotDocumentId = typeof slot === "string"
+        ? DEFAULT_TABLE_DOCUMENT_ID
+        : slot.tableState?.documentId ?? getTablePaneDocumentId(getWorkspacePaneId(slot, index));
+      documentIds.add(slotDocumentId || DEFAULT_TABLE_DOCUMENT_ID);
+    }
+
+    const nextDocuments = { ...tableDocuments };
+    const changedDocumentIds = new Set();
+    let nextDefaultDocument = null;
+
+    for (const documentId of documentIds) {
+      const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
+      const currentDocument = nextDocuments[normalizedDocumentId] ?? getTableDocument(normalizedDocumentId);
+      const transformedDocument = transformDocument(currentDocument);
+      if (transformedDocument === currentDocument) continue;
+
+      nextDocuments[normalizedDocumentId] = transformedDocument;
+      changedDocumentIds.add(normalizedDocumentId);
+      if (normalizedDocumentId === DEFAULT_TABLE_DOCUMENT_ID) {
+        nextDefaultDocument = transformedDocument;
+      }
+    }
+
+    if (changedDocumentIds.size === 0) return false;
+
+    setTableDocuments(nextDocuments);
+    if (nextDefaultDocument) {
+      setDraftProjectName(nextDefaultDocument.draftProjectName);
+      setDraftRows(nextDefaultDocument.draftRows);
+      setCellStyles(nextDefaultDocument.cellStyles);
+    }
+    setStackingConflicts((conflicts) =>
+      conflicts.filter((conflict) => !changedDocumentIds.has(conflict.documentId || DEFAULT_TABLE_DOCUMENT_ID)),
+    );
+    setActiveConflictCellKey(null);
+    setConflictMenu(null);
+    setFooterConflictMenuPaneId(null);
+    setStatusMessage(statusMessage);
+    return true;
+  }
+
+  function saveSpreadsheetSettings() {
+    captureCurrentTableViewportMetrics();
+
+    const nextSpreadsheetSettings = normalizeSpreadsheetSettings(draftSpreadsheetSettings);
+    const isChangingSpreadsheetView = nextSpreadsheetSettings.view !== spreadsheetSettings.view;
+    const shouldDistributeIdenticalRooms =
+      !spreadsheetSettings.distributeIdenticalRooms && nextSpreadsheetSettings.distributeIdenticalRooms;
+    const shouldConsolidateIdenticalRooms =
+      spreadsheetSettings.distributeIdenticalRooms && !nextSpreadsheetSettings.distributeIdenticalRooms;
+    const isChangingIdenticalRoomDistribution =
+      nextSpreadsheetSettings.distributeIdenticalRooms !== spreadsheetSettings.distributeIdenticalRooms;
+
+    if (isChangingSpreadsheetView || isChangingIdenticalRoomDistribution) {
+      finishTableCellEdit();
+    }
+    if (isChangingIdenticalRoomDistribution) {
+      clearActiveTableSelection();
+    }
+    if (shouldDistributeIdenticalRooms) {
+      transformOpenTableDocumentsForIdenticalRooms(
+        distributeTableDocumentForIdenticalRooms,
+        "Identical rooms distributed. Save to persist.",
+      );
+    } else if (shouldConsolidateIdenticalRooms) {
+      transformOpenTableDocumentsForIdenticalRooms(
+        consolidateTableDocumentForIdenticalRooms,
+        "Identical rooms consolidated. Save to persist.",
+      );
+    }
+    setSpreadsheetSettings(nextSpreadsheetSettings);
+    setSpreadsheetSettingsPaneId(null);
   }
 
   const activeWorkspaceSlots = workspaceSlots.length > 0
@@ -1478,6 +4230,17 @@ export default function App() {
     );
   }
 
+  function renderSettingsIcon() {
+    return (
+      <svg className="settings-icon" viewBox="0 0 18 18" aria-hidden="true" focusable="false">
+        <path
+          d="M8.2 2.3h1.6l.4 1.9c.5.1.9.3 1.3.5L13.2 3.6l1.1 1.1-1.1 1.7c.2.4.4.8.5 1.3l1.9.4v1.6l-1.9.4c-.1.5-.3.9-.5 1.3l1.1 1.7-1.1 1.1-1.7-1.1c-.4.2-.8.4-1.3.5l-.4 1.9H8.2l-.4-1.9c-.5-.1-.9-.3-1.3-.5l-1.7 1.1-1.1-1.1 1.1-1.7c-.2-.4-.4-.8-.5-1.3l-1.9-.4V8.1l1.9-.4c.1-.5.3-.9.5-1.3L3.7 4.7l1.1-1.1 1.7 1.1c.4-.2.8-.4 1.3-.5l.4-1.9Zm.8 4A2.7 2.7 0 1 0 9 11.7 2.7 2.7 0 0 0 9 6.3Z"
+          fillRule="evenodd"
+        />
+      </svg>
+    );
+  }
+
   function renderMatrixIcon() {
     return (
       <svg className="matrix-icon" viewBox="0 0 18 18" aria-hidden="true" focusable="false">
@@ -1491,20 +4254,62 @@ export default function App() {
   function renderDiagramsIcon() {
     return (
       <svg className="diagrams-icon" viewBox="0 0 18 18" aria-hidden="true" focusable="false">
-        <rect x="2.4" y="4.4" width="6.6" height="2.8" rx="0.75" />
-        <rect x="7.6" y="6" width="2.8" height="6" rx="0.75" />
-        <rect x="8.8" y="10.8" width="6.8" height="2.8" rx="0.75" />
+        <rect x="3" y="9.5" width="2.8" height="5.5" rx="0.7" />
+        <rect x="7.6" y="4.6" width="2.8" height="10.4" rx="0.7" />
+        <rect x="12.2" y="7.2" width="2.8" height="7.8" rx="0.7" />
       </svg>
+    );
+  }
+
+  function renderProjectMenuButton(className = "") {
+    return (
+      <button
+        className={`project-menu-button${className ? ` ${className}` : ""}`}
+        type="button"
+        onClick={toggleProjectMenu}
+        aria-label="Project menu"
+        aria-expanded={isProjectMenuOpen}
+      >
+        <svg className="dots-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <circle cx="5" cy="12" r="2" />
+          <circle cx="12" cy="12" r="2" />
+          <circle cx="19" cy="12" r="2" />
+        </svg>
+      </button>
+    );
+  }
+
+  function renderProjectActionsMenu(className = "") {
+    return (
+      <div className={`project-actions-menu${className ? ` ${className}` : ""}`} role="menu" onClick={(event) => event.stopPropagation()}>
+        <button type="button" role="menuitem" onClick={openProjectImportPicker} disabled={isImporting}>
+          Import Project
+        </button>
+        <button type="button" role="menuitem" onClick={exportProjectFile} disabled={isProjectSaving || isImporting}>
+          Export Project
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            setIsProjectMenuOpen(false);
+            saveProjectToBackend();
+          }}
+          disabled={isProjectSaving || isImporting}
+        >
+          Save Project
+        </button>
+      </div>
     );
   }
 
   function renderSideToolMenu(side) {
     if (sideToolMenu !== side) return null;
 
-    const tableAngle = side === "left" ? "-45deg" : "-135deg";
-    const diagramsAngle = side === "left" ? "45deg" : "135deg";
-    const tableCounterAngle = side === "left" ? "45deg" : "135deg";
-    const diagramsCounterAngle = side === "left" ? "-45deg" : "-135deg";
+    const tableAngle = "-90deg";
+    const diagramsAngle = "90deg";
+    const tableCounterAngle = "90deg";
+    const diagramsCounterAngle = "-90deg";
 
     return (
       <div className={`workspace-side-tool-menu is-${side}`} aria-label={`${side} workspace tools`}>
@@ -1543,6 +4348,12 @@ export default function App() {
         >
           {renderPlusIcon()}
         </button>
+        {side === "right" && (
+          <>
+            {renderProjectMenuButton("workspace-project-menu-button")}
+            {isProjectMenuOpen && renderProjectActionsMenu("is-workspace-menu")}
+          </>
+        )}
       </aside>
     );
   }
@@ -1550,23 +4361,172 @@ export default function App() {
   function renderDiagramsPane(slot, paneIndex) {
     const paneId = getWorkspacePaneId(slot, paneIndex);
     const diagramState = typeof slot === "string"
-      ? { activeView: activeDiagramView, stackingSettings }
-      : slot.diagramState ?? { activeView: "stacking", stackingSettings: createDefaultStackingSettings() };
+      ? { ...createDefaultDiagramState(), activeView: activeDiagramView, stackingSettings }
+      : slot.diagramState ?? createDefaultDiagramState();
     const paneActiveDiagramView = diagramState.activeView ?? "stacking";
-    const paneStackingSettings = diagramState.stackingSettings ?? createDefaultStackingSettings();
+    const paneStackingSettings = {
+      ...createDefaultStackingSettings(),
+      ...(diagramState.stackingSettings ?? {}),
+    };
+    const paneStackingDiagram = diagramState.stackingDiagram ?? null;
+    const paneSourceDocumentId = diagramState.sourceDocumentId ?? "";
+    const diagramSourceOptions = getAvailableTableDocumentOptions(paneSourceDocumentId);
+    const selectedSourceDocumentId = diagramSourceOptions.some((file) => file.id === paneSourceDocumentId) ? paneSourceDocumentId : "";
+    const selectedSourceProgramData = selectedSourceDocumentId ? tableDocuments[selectedSourceDocumentId]?.programData : null;
+    const effectivePaneStackingSettings = selectedSourceProgramData
+      ? getEffectiveStackingSettingsForProgramData(selectedSourceProgramData, paneStackingSettings)
+      : paneStackingSettings;
     const titleId = `diagrams-title-${paneIndex}`;
 
     const updateDiagramState = (updater) => {
       updateWorkspacePane(paneId, (pane) => ({
         ...pane,
-        diagramState: updater(pane.diagramState ?? { activeView: "stacking", stackingSettings: createDefaultStackingSettings() }),
+        diagramState: updater(pane.diagramState ?? createDefaultDiagramState()),
       }));
     };
 
     const updateStackingSettings = (updater) => {
+      updateDiagramState((currentState) => {
+        const currentSettings = {
+          ...createDefaultStackingSettings(),
+          ...(currentState.stackingSettings ?? {}),
+        };
+        const currentSourceId = currentState.sourceDocumentId || selectedSourceDocumentId;
+        const sourceProgramData = currentSourceId ? tableDocuments[currentSourceId]?.programData : null;
+        const currentEffectiveSettings = sourceProgramData
+          ? getEffectiveStackingSettingsForProgramData(sourceProgramData, currentSettings)
+          : currentSettings;
+        const nextSettings = updater(currentEffectiveSettings);
+        const nextDiagram = sourceProgramData
+          ? buildStackingDiagramForSource(sourceProgramData, nextSettings)
+          : currentState.stackingDiagram;
+
+        return {
+          ...currentState,
+          stackingSettings: nextSettings,
+          stackingDiagram: nextDiagram,
+        };
+      });
+    };
+
+    const applySharedStackingHeightSettings = (heightSettings) => {
+      if (!selectedSourceDocumentId || !selectedSourceProgramData) {
+        updateStackingSettings((settings) => ({
+          ...settings,
+          ...heightSettings,
+        }));
+        return;
+      }
+
+      const result = setProgramDataStackingHeightSettings(selectedSourceProgramData, heightSettings);
+      const sourceProgramData = result.data;
+      if (result.changed) {
+        updateTableDocumentProgramData(selectedSourceDocumentId, sourceProgramData, { markDirty: true });
+      }
+
+      setWorkspaceSlots((slots) =>
+        slots.map((currentSlot, index) => {
+          if (typeof currentSlot === "string" || getWorkspacePaneType(currentSlot) !== "diagrams") return currentSlot;
+
+          const currentPaneId = getWorkspacePaneId(currentSlot, index);
+          const currentState = currentSlot.diagramState ?? createDefaultDiagramState();
+          const currentSettings = {
+            ...createDefaultStackingSettings(),
+            ...(currentState.stackingSettings ?? {}),
+            ...heightSettings,
+          };
+
+          if (currentState.sourceDocumentId !== selectedSourceDocumentId) {
+            return currentPaneId === paneId
+              ? {
+                  ...currentSlot,
+                  diagramState: {
+                    ...currentState,
+                    stackingSettings: currentSettings,
+                  },
+                }
+              : currentSlot;
+          }
+
+          return {
+            ...currentSlot,
+            diagramState: {
+              ...currentState,
+              stackingSettings: currentSettings,
+              stackingDiagram: buildStackingDiagramForSource(sourceProgramData, currentSettings),
+            },
+          };
+        }),
+      );
+    };
+
+    const updateSharedStackingHeightSettings = (updater) => {
+      const nextSettings = updater(effectivePaneStackingSettings);
+      applySharedStackingHeightSettings(getStackingHeightSettings(nextSettings));
+    };
+
+    const handleDiagramSourceChange = async (event) => {
+      const sourceDocumentId = event.target.value;
+      if (!sourceDocumentId || sourceDocumentId === selectedSourceDocumentId) return;
+
+      try {
+        setErrorMessage("");
+        const loadedProgramData = await loadProgramDataFileDocument(sourceDocumentId);
+        const currentProgramData =
+          loadedProgramData ??
+          tableDocuments[sourceDocumentId]?.programData ??
+          getTableDocument(sourceDocumentId)?.programData;
+        const sourceState = ensureProgramDataDiagramSourceState(currentProgramData, paneStackingSettings);
+        const sourceProgramData = sourceState.data;
+        const hasExistingDocument = Boolean(tableDocuments[sourceDocumentId]);
+
+        if (hasExistingDocument) {
+          updateTableDocumentProgramData(sourceDocumentId, sourceProgramData, {
+            markDirty: sourceState.changed,
+            rebuildStackingConflicts: true,
+          });
+        } else {
+          setTableDocumentFromData(sourceDocumentId, sourceProgramData, {
+            markDirty: sourceState.changed,
+            rebuildStackingConflicts: true,
+          });
+        }
+
+        const nextSettings = getEffectiveStackingSettingsForProgramData(sourceProgramData, paneStackingSettings);
+        const stackingDiagram = buildStackingDiagramForSource(sourceProgramData, nextSettings);
+        if (stackingDiagram.floors.length === 0) {
+          throw new Error("The selected source does not contain any program areas to diagram.");
+        }
+
+        updateDiagramState((currentState) => ({
+          ...currentState,
+          sourceDocumentId,
+          stackingSettings: nextSettings,
+          stackingDiagram,
+        }));
+      } catch (error) {
+        setErrorMessage(error.message);
+      }
+    };
+
+    const handleStackingDiagramChange = (nextDiagram, change) => {
+      const dimension = change?.dimension;
+      if (dimension?.kind === "floor" || dimension?.kind === "slab") {
+        applySharedStackingHeightSettings(
+          getStackingHeightSettingsForDimension(dimension, change.value, effectivePaneStackingSettings),
+        );
+        return;
+      }
+
       updateDiagramState((currentState) => ({
         ...currentState,
-        stackingSettings: updater(currentState.stackingSettings ?? createDefaultStackingSettings()),
+        stackingSettings: dimension?.kind === "width"
+          ? {
+              ...(currentState.stackingSettings ?? createDefaultStackingSettings()),
+              defaultWidth: String(nextDiagram.defaultWidth ?? effectivePaneStackingSettings.defaultWidth),
+            }
+          : currentState.stackingSettings,
+        stackingDiagram: nextDiagram,
       }));
     };
 
@@ -1597,8 +4557,9 @@ export default function App() {
                 Areas
               </button>
             </div>
-            {paneActiveDiagramView === "stacking" && (
-              <div className="diagrams-settings" aria-label="Stacking diagram settings">
+            <div className="diagrams-settings" aria-label={`${paneActiveDiagramView === "stacking" ? "Stacking" : "Areas"} diagram settings`}>
+              {paneActiveDiagramView === "stacking" && (
+                <>
                 <label className="diagrams-field">
                   <span>Default Floor-to-Floor Height:</span>
                   <span className="diagrams-height-inputs">
@@ -1608,10 +4569,10 @@ export default function App() {
                       inputMode="numeric"
                       min="0"
                       step="1"
-                      value={paneStackingSettings.defaultFloorToFloorFeet}
+                      value={effectivePaneStackingSettings.defaultFloorToFloorFeet}
                       aria-label="Default floor-to-floor height feet"
                       onChange={(event) =>
-                        updateStackingSettings((settings) => ({
+                        updateSharedStackingHeightSettings((settings) => ({
                           ...settings,
                           defaultFloorToFloorFeet: event.target.value,
                         }))
@@ -1625,10 +4586,10 @@ export default function App() {
                       min="0"
                       max="11"
                       step="1"
-                      value={paneStackingSettings.defaultFloorToFloorInches}
+                      value={effectivePaneStackingSettings.defaultFloorToFloorInches}
                       aria-label="Default floor-to-floor height inches"
                       onChange={(event) =>
-                        updateStackingSettings((settings) => ({
+                        updateSharedStackingHeightSettings((settings) => ({
                           ...settings,
                           defaultFloorToFloorInches: event.target.value,
                         }))
@@ -1639,9 +4600,32 @@ export default function App() {
                 </label>
 
                 <label className="diagrams-field">
+                  <span>Default Width:</span>
+                  <span className="diagrams-measure-inputs">
+                    <input
+                      className="diagrams-number-input diagrams-width-input"
+                      type="number"
+                      inputMode="decimal"
+                      min="1"
+                      step="1"
+                      value={effectivePaneStackingSettings.defaultWidth}
+                      aria-label="Default diagram width in feet"
+                      onChange={(event) =>
+                        updateStackingSettings((settings) => ({
+                          ...settings,
+                          defaultWidth: event.target.value,
+                        }))
+                      }
+                    />
+                    <span aria-hidden="true">ft</span>
+                  </span>
+                </label>
+
+                <label className="diagrams-field">
                   <span>Level of Detail:</span>
                   <select
-                    value={paneStackingSettings.levelOfDetail}
+                    className="diagrams-detail-select"
+                    value={effectivePaneStackingSettings.levelOfDetail}
                     onChange={(event) =>
                       updateStackingSettings((settings) => ({
                         ...settings,
@@ -1649,11 +4633,11 @@ export default function App() {
                       }))
                     }
                   >
-                    <option value="functionalGroup">Functional Group</option>
-                    <option value="departmentFunction">Department Function</option>
-                    <option value="department">Department</option>
-                    <option value="functionalArea">Functional Area</option>
-                    <option value="room">Room</option>
+                    {LEVEL_OF_DETAIL_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
                   </select>
                 </label>
 
@@ -1665,7 +4649,7 @@ export default function App() {
                     inputMode="decimal"
                     min="0"
                     step="0.1"
-                    value={paneStackingSettings.textSize}
+                    value={effectivePaneStackingSettings.textSize}
                     onChange={(event) =>
                       updateStackingSettings((settings) => ({
                         ...settings,
@@ -1676,9 +4660,9 @@ export default function App() {
                 </label>
 
                 <button
-                  className={`diagrams-toggle-button${paneStackingSettings.grossSquareFootage ? " is-on" : ""}`}
+                  className={`diagrams-toggle-button${effectivePaneStackingSettings.grossSquareFootage ? " is-on" : ""}`}
                   type="button"
-                  aria-pressed={paneStackingSettings.grossSquareFootage}
+                  aria-pressed={effectivePaneStackingSettings.grossSquareFootage}
                   onClick={() =>
                     updateStackingSettings((settings) => ({
                       ...settings,
@@ -1690,9 +4674,9 @@ export default function App() {
                 </button>
 
                 <button
-                  className={`diagrams-toggle-button${paneStackingSettings.netSquareFootage ? " is-on" : ""}`}
+                  className={`diagrams-toggle-button${effectivePaneStackingSettings.netSquareFootage ? " is-on" : ""}`}
                   type="button"
-                  aria-pressed={paneStackingSettings.netSquareFootage}
+                  aria-pressed={effectivePaneStackingSettings.netSquareFootage}
                   onClick={() =>
                     updateStackingSettings((settings) => ({
                       ...settings,
@@ -1702,62 +4686,249 @@ export default function App() {
                 >
                   <span>Net Square Footage</span>
                 </button>
-              </div>
-            )}
+                </>
+              )}
+
+              <label className="diagrams-field">
+                <span>Source:</span>
+                <select
+                  className="diagrams-source-select"
+                  value={selectedSourceDocumentId}
+                  onChange={handleDiagramSourceChange}
+                  disabled={diagramSourceOptions.length === 0 || Boolean(loadingProgramDataFileId)}
+                >
+                  {diagramSourceOptions.length === 0 ? (
+                    <option value="">No parsed JSON files</option>
+                  ) : (
+                    <>
+                      <option value="" disabled>
+                        Select source
+                      </option>
+                      {diagramSourceOptions.map((file) => (
+                        <option key={file.id} value={file.id}>
+                          {file.label}
+                        </option>
+                      ))}
+                    </>
+                  )}
+                  </select>
+                </label>
+            </div>
           </aside>
-          <div className="diagrams-canvas" aria-label="Diagram canvas" />
+          <StackingDiagramCanvas
+            diagram={paneStackingDiagram}
+            sourceDocumentId={selectedSourceDocumentId}
+            onDiagramChange={handleStackingDiagramChange}
+            onSegmentFloorChange={(change) => handleStackingSegmentFloorChange(selectedSourceDocumentId, change, paneId)}
+          />
         </div>
       </section>
+    );
+  }
+
+  function renderHierarchicalSpreadsheetView(documentId, tableDocument, rows, paneId) {
+    const hierarchy = buildSpreadsheetHierarchy(tableDocument.programData, rows);
+
+    if (hierarchy.rowCount === 0) {
+      return <div className="empty-state">No program rows</div>;
+    }
+
+    return (
+      <div className="hierarchical-spreadsheet" aria-label="Hierarchical spreadsheet view">
+        {hierarchy.children.length > 0 ? (
+          hierarchy.children.map((node) => renderHierarchyNode(node, documentId, paneId, 0))
+        ) : (
+          renderHierarchyRowsTable(hierarchy.rows, documentId, paneId, hierarchy.label)
+        )}
+      </div>
+    );
+  }
+
+  function renderHierarchyNode(node, documentId, paneId, depth) {
+    const isOpen = isHierarchyNodeOpen(paneId, documentId, node.key, depth);
+
+    return (
+      <details
+        className="hierarchy-node"
+        key={node.key}
+        open={isOpen}
+        onToggle={(event) => updateHierarchyNodeOpenState(paneId, documentId, node.key, event.currentTarget.open)}
+      >
+        <summary className="hierarchy-node-summary">
+          <span className="hierarchy-node-heading">
+            <span className="hierarchy-node-level">{node.levelLabel}</span>
+            <span className="hierarchy-node-name">{node.label}</span>
+          </span>
+          <span className="hierarchy-node-meta">
+            {node.rowCount === 1 ? "1 room" : `${node.rowCount} rooms`} / {formatArea(node.totalNsf)} NSF
+          </span>
+        </summary>
+        <div className="hierarchy-node-content">
+          {node.children.map((child) => renderHierarchyNode(child, documentId, paneId, depth + 1))}
+          {node.rows.length > 0 && renderHierarchyRowsTable(node.rows, documentId, paneId, node.label)}
+        </div>
+      </details>
+    );
+  }
+
+  function getHierarchyOpenStateKey(paneId, documentId) {
+    return `${paneId || "default"}::${documentId || DEFAULT_TABLE_DOCUMENT_ID}`;
+  }
+
+  function isHierarchyNodeOpen(paneId, documentId, nodeKey, depth) {
+    const stateKey = getHierarchyOpenStateKey(paneId, documentId);
+    const storedValue = hierarchyNodeOpenStates[stateKey]?.[nodeKey];
+    return typeof storedValue === "boolean" ? storedValue : depth === 0;
+  }
+
+  function updateHierarchyNodeOpenState(paneId, documentId, nodeKey, isOpen) {
+    const stateKey = getHierarchyOpenStateKey(paneId, documentId);
+
+    setHierarchyNodeOpenStates((states) => {
+      const currentState = states[stateKey] ?? {};
+      if (currentState[nodeKey] === isOpen) return states;
+
+      return {
+        ...states,
+        [stateKey]: {
+          ...currentState,
+          [nodeKey]: isOpen,
+        },
+      };
+    });
+  }
+
+  function renderHierarchyRowsTable(rows, documentId, paneId, label) {
+    const hierarchyColumns = getHierarchicalSpreadsheetColumns(spreadsheetSettings);
+    const tableWidth = getHierarchicalTableMinWidth(hierarchyColumns);
+
+    return (
+      <div className="hierarchy-leaf-table-wrap">
+        <table className="program-table hierarchy-leaf-table" style={{ width: tableWidth, minWidth: tableWidth }} aria-label={`${label} rooms and programs`}>
+          <thead>
+            <tr>
+              {hierarchyColumns.map((column) => (
+                <th className={column.className} key={column.key} scope="col" style={getTableColumnStyle(column.key)}>
+                  <span className="column-label">{getTableColumnDisplayLabel(column)}</span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const totalNsf = computeTotalNsf(row.quantity, row.nsfPerUnit);
+
+              return (
+                <tr key={row.id}>
+                  {hierarchyColumns.map((column) => (
+                    <td className={column.className} key={column.key} style={getTableColumnStyle(column.key)}>
+                      {column.key === "totalNsf" ? (
+                        <output aria-label={getCellAriaLabel(row, column)}>{formatArea(totalNsf)}</output>
+                      ) : (
+                        <input
+                          value={row[column.key] ?? ""}
+                          inputMode={getCellInputMode(column.key)}
+                          onChange={(event) => updateRow(row.id, column.key, event.target.value, documentId)}
+                          onFocus={() => setActiveTablePaneId(paneId)}
+                          aria-label={getCellAriaLabel(row, column)}
+                        />
+                      )}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     );
   }
 
   function renderTablePane(slot, paneIndex) {
     const paneId = getWorkspacePaneId(slot, paneIndex);
     const tableState = typeof slot === "string"
-      ? { documentId: DEFAULT_TABLE_DOCUMENT_ID, sortConfig, advancedSortConfig, selectedCells: selectedTableCells, selectionAnchor: tableSelectionAnchor }
+      ? {
+          documentId: DEFAULT_TABLE_DOCUMENT_ID,
+          sortConfig,
+          advancedSortConfig,
+          selectedCells: selectedTableCells,
+          selectionRanges: selectedTableRanges,
+          selectionAnchor: tableSelectionAnchor,
+        }
       : slot.tableState ?? createDefaultTablePaneState();
     const documentId = tableState.documentId ?? DEFAULT_TABLE_DOCUMENT_ID;
     const tableDocument = getTableDocument(documentId);
     const paneSortConfig = tableState.sortConfig ?? null;
     const paneAdvancedSortConfig = tableState.advancedSortConfig ?? null;
-    const paneSelectedCells = tableState.selectedCells ?? [];
-    const paneSelectedCellSet = new Set(paneSelectedCells);
-    const paneSortedRows = sortRows(tableDocument.draftRows, paneSortConfig, paneAdvancedSortConfig);
+    const isBlankSpreadsheet = tableDocument.draftRows.length === 0;
+    const isHierarchicalSpreadsheetView = spreadsheetSettings.view === TABLE_VIEW_HIERARCHICAL && !isBlankSpreadsheet;
+    const paneViewKey = isHierarchicalSpreadsheetView ? TABLE_VIEW_HIERARCHICAL : TABLE_VIEW_SPREADSHEET;
+    const paneColumns = getTableColumnsForDocument(tableDocument, spreadsheetSettings);
+    const paneSortedRows = getTableRowsForDisplay(documentId, tableDocument, paneSortConfig, paneAdvancedSortConfig);
     const paneVisibleRowIndexById = new Map(paneSortedRows.map((row, index) => [row.id, index]));
+    const paneColumnIndexByKey = new Map(paneColumns.map((column, index) => [column.key, index]));
+    const paneSelectionRanges = getSelectionRangesFromState(tableState);
+    const paneNormalizedSelectionRanges = getNormalizedSelectionRanges(
+      paneSelectionRanges,
+      paneVisibleRowIndexById,
+      paneColumnIndexByKey,
+    );
+    const paneSelectionCellCount = getSelectionCellCount(paneNormalizedSelectionRanges);
+    const paneSelectedRowIds = getSelectedRowIdsFromRanges(paneNormalizedSelectionRanges, paneSortedRows);
+    const paneSelectedColumnKeys = getSelectedColumnKeysFromRanges(paneNormalizedSelectionRanges, paneColumns);
+    const panePendingConflictCellPositions = getStackingConflictCellPositionSet(documentId, paneSortedRows, paneColumns);
+    const paneActiveCell = tableState.selectionAnchor ?? getFirstSelectionCell(paneSelectionRanges);
+    const paneTableWidth = getPaneTableMinWidth(paneColumns);
+    const virtualRows = getVirtualTableRows(paneSortedRows, getTableViewportMetricsForPane(paneId, paneViewKey));
+    const visibleConflictAnchorCellKeys = getVisibleStackingConflictAnchorCellKeys(documentId, virtualRows.rows);
     const titleId = `program-table-title-${paneIndex}`;
     const isPaneSaving = savingTablePaneId === paneId;
     const isPaneImporting = activeSpreadsheetImportPaneId === paneId && isImporting;
     const shouldShowLoading = isLoading && (!isImporting || !activeSpreadsheetImportPaneId || isPaneImporting);
-    const spreadsheetTitle = tableDocument.draftProjectName || "Untitled Project";
+    const spreadsheetTitleValue = tableDocument.draftProjectName ?? "";
+    const spreadsheetTitle = spreadsheetTitleValue || "Untitled Project";
     const isTitleMenuOpen = openSpreadsheetTitlePaneId === paneId;
     const documentOptions = getAvailableTableDocumentOptions(documentId);
     const selectableDocumentOptions = documentOptions.filter((option) => option.id !== documentId);
+    const pendingPaneConflicts = stackingConflicts.filter(
+      (conflict) => conflict.documentId === documentId && conflict.status === "pending" && conflict.rowIds.length > 0,
+    );
+    const paneConflictCount = pendingPaneConflicts.length;
+    const paneConflictLabel = paneConflictCount === 1 ? "1 conflict" : `${paneConflictCount} conflicts`;
+    const paneConflictIds = pendingPaneConflicts.map((conflict) => conflict.id);
+    const isFooterConflictMenuOpen = footerConflictMenuPaneId === paneId && paneConflictCount > 0;
 
     return (
-      <section className="table-modal table-app" role="region" aria-labelledby={titleId}>
+      <section className="table-modal table-app" role="region" aria-labelledby={titleId} data-pane-id={paneId}>
         <header className="table-modal-header">
           <div
             className={`program-title-dropdown${isTitleMenuOpen ? " is-open" : ""}`}
             onClick={(event) => event.stopPropagation()}
           >
+            <span className="program-title-editor-wrap" data-value={spreadsheetTitle}>
+              <input
+                id={titleId}
+                className="program-title-input program-title-editor"
+                type="text"
+                value={spreadsheetTitleValue}
+                placeholder="Untitled Project"
+                aria-label="Spreadsheet title"
+                onChange={(event) => updateSpreadsheetTitle(documentId, event.target.value)}
+                onFocus={() => setActiveTablePaneId(paneId)}
+              />
+            </span>
             <button
-              id={titleId}
-              className="program-title-input program-title-trigger"
+              className="program-title-arrow-button"
               type="button"
-              aria-label="Spreadsheet"
+              aria-label="Spreadsheet options"
               aria-haspopup="menu"
               aria-expanded={isTitleMenuOpen}
               onClick={() => toggleSpreadsheetTitleMenu(paneId)}
             >
-              <span className="program-title-text">{spreadsheetTitle}</span>
               <span className="program-title-arrow" aria-hidden="true" />
             </button>
             {isTitleMenuOpen && (
               <div className="program-title-menu" role="menu" aria-label="Spreadsheet options">
-                <button className="program-title-menu-current" type="button" role="menuitem" onClick={() => setOpenSpreadsheetTitlePaneId(null)}>
-                  <span className="program-title-text">{spreadsheetTitle}</span>
-                  <span className="program-title-arrow" aria-hidden="true" />
-                </button>
                 {selectableDocumentOptions.map((option) => (
                   <button
                     className="program-title-menu-item"
@@ -1776,106 +4947,361 @@ export default function App() {
           </div>
         </header>
 
-        <div className="table-shell">
+        <div
+          className={`table-shell${isHierarchicalSpreadsheetView ? " hierarchical-table-shell" : ""}`}
+          data-table-pane-id={paneId}
+          data-table-view={paneViewKey}
+          ref={(element) => registerTableShell(paneId, element)}
+          onScroll={(event) => updateTableViewportMetrics(paneId, event.currentTarget, paneViewKey)}
+        >
           {shouldShowLoading ? (
             <div className="empty-state">{isPaneImporting ? "Importing" : "Loading"}</div>
           ) : errorMessage && tableDocument.draftRows.length === 0 ? (
             <div className="empty-state">{errorMessage}</div>
+          ) : isHierarchicalSpreadsheetView ? (
+            renderHierarchicalSpreadsheetView(documentId, tableDocument, paneSortedRows, paneId)
           ) : (
-            <table className="program-table">
-              <thead>
-                <tr>
-                  {columns.map((column) => (
+            <>
+              <table className="program-table" style={{ width: paneTableWidth, minWidth: paneTableWidth }}>
+                <thead>
+                  <tr>
                     <th
-                      className={column.className}
-                      key={column.key}
+                      className="col-row-number"
                       scope="col"
-                      aria-sort={getAriaSort(column.key, paneSortConfig)}
-                      onContextMenu={(event) => openColumnMenu(event, column.key, paneId)}
-                    >
-                      <button className="column-sort-button" type="button" onClick={() => handleSort(column.key, paneId)}>
-                        <span className="column-label">{column.label}</span>
-                        <span className={`sort-icon ${getSortIconClass(column.key, paneSortConfig)}`} aria-hidden="true">
-                          <span className="sort-triangle sort-triangle-up" />
-                          <span className="sort-triangle sort-triangle-down" />
-                        </span>
-                      </button>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {paneSortedRows.map((row) => {
-                  const totalNsf = computeTotalNsf(row.quantity, row.nsfPerUnit);
-
-                  return (
-                    <tr key={row.id}>
-                      {columns.map((column) => {
-                        const cellClassName = [
+                      aria-label="Row number"
+                      style={{ width: `${TABLE_ROW_NUMBER_COLUMN_WIDTH}px`, minWidth: `${TABLE_ROW_NUMBER_COLUMN_WIDTH}px` }}
+                    />
+                    {paneColumns.map((column, columnIndex) => (
+                      <th
+                        className={[
                           column.className,
-                          getTableCellClassName(
-                            row.id,
-                            column.key,
-                            paneSelectedCells,
-                            paneSelectedCellSet,
-                            paneVisibleRowIndexById,
-                            paneSortedRows,
-                            tableDocument.cellStyles,
-                          ),
-                        ]
-                          .filter(Boolean)
-                          .join(" ");
-
-                        return (
-                          <td
-                            className={cellClassName}
-                            key={column.key}
-                            onMouseDown={(event) =>
-                              handleTableCellMouseDown(
-                                event,
-                                row.id,
-                                column.key,
-                                paneId,
-                                paneSelectedCells,
-                                tableState.selectionAnchor,
-                                paneVisibleRowIndexById,
-                                paneSortedRows,
-                              )
-                            }
-                          >
-                            {column.key === "totalNsf" ? (
-                              <output aria-label={getCellAriaLabel(row, column)}>{formatArea(totalNsf)}</output>
-                            ) : (
-                              <input
-                                value={row[column.key]}
-                                inputMode={getCellInputMode(column.key)}
-                                onChange={(event) => updateRow(row.id, column.key, event.target.value, documentId)}
-                                onFocus={() => selectSingleTableCell(row.id, column.key, paneId)}
-                                aria-label={getCellAriaLabel(row, column)}
-                              />
-                            )}
-                          </td>
-                        );
-                      })}
+                          paneSelectedColumnKeys.has(column.key) ? "is-header-selected" : "",
+                        ].filter(Boolean).join(" ")}
+                        key={column.key}
+                        scope="col"
+                        aria-sort={getAriaSort(column.key, paneSortConfig)}
+                        style={getTableColumnStyle(column.key)}
+                        onContextMenu={(event) => openColumnMenu(event, column.key, paneId)}
+                      >
+                        <button
+                          className="column-select-button"
+                          type="button"
+                          onMouseDown={(event) =>
+                            handleTableColumnHeaderMouseDown(
+                              event,
+                              column.key,
+                              paneId,
+                              paneSortedRows,
+                              paneSelectionRanges,
+                              tableState.selectionAnchor,
+                              paneColumns,
+                            )
+                          }
+                          onClick={(event) => event.preventDefault()}
+                          onKeyDown={(event) => {
+                            if (event.key !== "Enter" && event.key !== " ") return;
+                            handleTableColumnHeaderMouseDown(
+                              event,
+                              column.key,
+                              paneId,
+                              paneSortedRows,
+                              paneSelectionRanges,
+                              tableState.selectionAnchor,
+                              paneColumns,
+                            );
+                          }}
+                        >
+                          <span className="column-label">
+                            {getTableColumnHeaderLabel(column, columnIndex, isBlankSpreadsheet)}
+                          </span>
+                        </button>
+                        <button
+                          className="column-sort-toggle"
+                          type="button"
+                          aria-label={`Sort ${getTableColumnDisplayLabel(column)}`}
+                          onMouseDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleSort(column.key, paneId);
+                          }}
+                        >
+                          <span className={`sort-icon ${getSortIconClass(column.key, paneSortConfig)}`} aria-hidden="true">
+                            <span className="sort-triangle sort-triangle-up" />
+                            <span className="sort-triangle sort-triangle-down" />
+                          </span>
+                        </button>
+                        <span
+                          className="table-column-resize-handle"
+                          role="separator"
+                          aria-orientation="vertical"
+                          onMouseDown={(event) => startTableColumnResize(event, column.key)}
+                        />
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {virtualRows.topSpacerHeight > 0 && (
+                    <tr className="table-virtual-spacer" aria-hidden="true">
+                      <td
+                        colSpan={paneColumns.length + 1}
+                        style={{ height: `${virtualRows.topSpacerHeight}px`, minHeight: `${virtualRows.topSpacerHeight}px` }}
+                      />
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                  )}
+                  {virtualRows.rows.map(({ row, rowIndex }) => {
+                    const totalNsf = computeTotalNsf(row.quantity, row.nsfPerUnit);
+                    const rowHeight = getTableRowHeight(row.id);
+
+                    return (
+                      <tr key={row.id} style={{ "--table-row-height": `${rowHeight}px` }}>
+                        <th
+                          className={[
+                            "col-row-number",
+                            "row-number-cell",
+                            paneSelectedRowIds.has(row.id) ? "is-header-selected" : "",
+                          ].filter(Boolean).join(" ")}
+                          scope="row"
+                          style={{ width: `${TABLE_ROW_NUMBER_COLUMN_WIDTH}px`, minWidth: `${TABLE_ROW_NUMBER_COLUMN_WIDTH}px` }}
+                          onMouseDown={(event) =>
+                            handleTableRowHeaderMouseDown(
+                              event,
+                              row.id,
+                              paneId,
+                              paneSelectionRanges,
+                              tableState.selectionAnchor,
+                              paneVisibleRowIndexById,
+                              paneSortedRows,
+                              paneColumns,
+                            )
+                          }
+                        >
+                          {rowIndex + 1}
+                          <span
+                            className="table-row-resize-handle"
+                            role="separator"
+                            aria-orientation="horizontal"
+                            onMouseDown={(event) => startTableRowResize(event, row.id)}
+                          />
+                        </th>
+                        {paneColumns.map((column, columnIndex) => {
+                          const isEditing = isTableCellEditing(paneId, row.id, column.key);
+                          const cellKey = getCellKey(row.id, column.key);
+                          const documentCellKey = getDocumentCellKey(documentId, row.id, column.key);
+                          const stackingConflict = getStackingConflictForCell(documentId, row.id, column.key);
+                          const isConflictMenuOpen =
+                            Boolean(stackingConflict) &&
+                            conflictMenu?.conflictId === stackingConflict.id &&
+                            conflictMenu?.cellKey === documentCellKey;
+                          const shouldShowConflictButton =
+                            Boolean(stackingConflict) &&
+                            visibleConflictAnchorCellKeys.has(documentCellKey);
+                          const isActiveCell = paneActiveCell?.rowId === row.id && paneActiveCell?.columnKey === column.key;
+                          const cellClassName = [
+                            column.className,
+                            isEditing ? "is-cell-editing" : "",
+                            isActiveCell ? "is-cell-active" : "",
+                            stackingConflict ? "is-stacking-conflict" : "",
+                            stackingConflict?.status === "pending" ? "is-stacking-conflict-pending" : "",
+                            shouldShowConflictButton ? "has-stacking-conflict-control" : "",
+                            getStackingConflictEdgeClassName(rowIndex, columnIndex, panePendingConflictCellPositions),
+                            getTableCellClassName(
+                              row.id,
+                              column.key,
+                              rowIndex,
+                              columnIndex,
+                              paneNormalizedSelectionRanges,
+                              paneSelectionCellCount,
+                              tableDocument.cellStyles,
+                            ),
+                          ]
+                            .filter(Boolean)
+                            .join(" ");
+
+                          return (
+                            <td
+                              className={cellClassName}
+                              key={column.key}
+                              data-cell-key={cellKey}
+                              data-column-index={columnIndex}
+                              data-row-index={rowIndex}
+                              style={getTableColumnStyle(column.key)}
+                              onMouseDown={(event) =>
+                                handleTableCellMouseDown(
+                                  event,
+                                  row.id,
+                                  column.key,
+                                  paneId,
+                                  paneSelectionRanges,
+                                  tableState.selectionAnchor,
+                                  paneVisibleRowIndexById,
+                                  paneSortedRows,
+                                  paneColumns,
+                                )
+                              }
+                              onMouseEnter={() =>
+                                handleTableCellMouseEnter(row.id, column.key, paneId, paneVisibleRowIndexById, paneSortedRows, paneColumns)
+                              }
+                              onDoubleClick={(event) => handleTableCellDoubleClick(event, row.id, column.key, paneId)}
+                            >
+                              {shouldShowConflictButton && (
+                                <div
+                                  className="stacking-conflict-control"
+                                  onMouseDown={(event) => event.stopPropagation()}
+                                  onClick={(event) => event.stopPropagation()}
+                                >
+                                  <button
+                                    className="stacking-conflict-button"
+                                    type="button"
+                                    aria-label="Show information conflict"
+                                    aria-expanded={isConflictMenuOpen}
+                                    onClick={() => {
+                                      setFooterConflictMenuPaneId(null);
+                                      setConflictMenu((currentMenu) =>
+                                        currentMenu?.conflictId === stackingConflict.id && currentMenu?.cellKey === documentCellKey
+                                          ? null
+                                          : {
+                                              cellKey: documentCellKey,
+                                              conflictId: stackingConflict.id,
+                                            },
+                                      );
+                                    }}
+                                  >
+                                    <span aria-hidden="true">!</span>
+                                  </button>
+                                  {isConflictMenuOpen && (
+                                    <div className="stacking-conflict-menu" role="dialog" aria-label="Information conflict">
+                                      <p>
+                                        <strong>Information conflict:</strong>{" "}
+                                        {getStackingConflictExplanation(stackingConflict)}
+                                      </p>
+                                      <div className="stacking-conflict-menu-actions">
+                                        <button type="button" onClick={() => resolveStackingConflict(stackingConflict.id)}>
+                                          Update to match diagram
+                                        </button>
+                                        <button type="button" onClick={() => updateStackingConflictDiagramToMatch(stackingConflict.id)}>
+                                          Update diagram to match
+                                        </button>
+                                        <button type="button" onClick={() => ignoreStackingConflict(stackingConflict.id)}>
+                                          Temporarily ignore
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                              {column.key === "totalNsf" && !isBlankSpreadsheet ? (
+                                <output aria-label={getCellAriaLabel(row, column)}>{formatArea(totalNsf)}</output>
+                              ) : isEditing ? (
+                                <input
+                                  ref={isEditing ? editingCellInputRef : null}
+                                  value={row[column.key] ?? ""}
+                                  inputMode={getCellInputMode(column.key)}
+                                  readOnly={!isEditing}
+                                  tabIndex={isEditing ? 0 : -1}
+                                  onChange={(event) => updateRow(row.id, column.key, event.target.value, documentId)}
+                                  onBlur={() => handleTableCellInputBlur(row.id, column.key, paneId)}
+                                  aria-label={getCellAriaLabel(row, column)}
+                                />
+                              ) : (
+                                <span className="table-cell-display" aria-label={getCellAriaLabel(row, column)}>
+                                  {row[column.key] ?? ""}
+                                </span>
+                              )}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+                  {virtualRows.bottomSpacerHeight > 0 && (
+                    <tr className="table-virtual-spacer" aria-hidden="true">
+                      <td
+                        colSpan={paneColumns.length + 1}
+                        style={{ height: `${virtualRows.bottomSpacerHeight}px`, minHeight: `${virtualRows.bottomSpacerHeight}px` }}
+                      />
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </>
           )}
         </div>
 
         <footer className="table-modal-footer">
           <div className="footer-left-actions">
-            <button className="secondary-button" type="button" onClick={() => openSpreadsheetImportPicker(paneId)} disabled={isPaneSaving || isPaneImporting}>
+            <button
+              className="secondary-button table-footer-icon-button"
+              type="button"
+              onClick={() => openSpreadsheetSettings(paneId)}
+              aria-label="Spreadsheet settings"
+              title="Spreadsheet settings"
+              disabled={isPaneSaving || isPaneImporting}
+            >
+              {renderSettingsIcon()}
+            </button>
+            <button className="secondary-button table-footer-button" type="button" onClick={() => openSpreadsheetImportPicker(paneId)} disabled={isPaneSaving || isPaneImporting}>
               {isPaneImporting ? "Importing" : "Import"}
             </button>
-            <div className="save-status" role="status">
-              {errorMessage || statusMessage}
-            </div>
           </div>
           <div className="footer-actions">
-            <button className="primary-button" type="button" onClick={() => handleSave(paneId)} disabled={shouldShowLoading || isPaneSaving || isPaneImporting}>
+            <div
+              className="table-footer-warning-control"
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <button
+                className={[
+                  "stacking-conflict-button",
+                  "table-footer-warning-button",
+                  paneConflictCount > 0 ? "has-conflicts" : "is-clear",
+                ].join(" ")}
+                type="button"
+                onClick={() => {
+                  if (paneConflictCount === 0) return;
+                  setConflictMenu(null);
+                  setFooterConflictMenuPaneId((currentPaneId) => (currentPaneId === paneId ? null : paneId));
+                }}
+                aria-label={paneConflictCount > 0 ? `Show spreadsheet ${paneConflictLabel}` : "No spreadsheet conflicts"}
+                aria-haspopup={paneConflictCount > 0 ? "menu" : undefined}
+                aria-expanded={paneConflictCount > 0 ? isFooterConflictMenuOpen : undefined}
+                title={paneConflictCount > 0 ? paneConflictLabel : "No conflicts"}
+                disabled={shouldShowLoading || isPaneSaving || isPaneImporting}
+              >
+                {paneConflictCount > 0 ? (
+                  <span aria-hidden="true">!</span>
+                ) : (
+                  <span className="table-footer-warning-check" aria-hidden="true" />
+                )}
+              </button>
+              {isFooterConflictMenuOpen && (
+                <div className="footer-conflict-menu" role="menu" aria-label="Spreadsheet conflicts">
+                  <div className="footer-conflict-menu-list">
+                    {pendingPaneConflicts.map((conflict) => (
+                      <button
+                        className="footer-conflict-menu-item"
+                        type="button"
+                        role="menuitem"
+                        key={conflict.id}
+                        onClick={() => focusStackingConflict(conflict.id)}
+                      >
+                        <span className="footer-conflict-menu-title">{getStackingConflictCausalityTitle(conflict)}</span>
+                        <span className="footer-conflict-menu-meta">{getStackingConflictCausalityMeta(conflict)}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="footer-conflict-menu-actions">
+                    <button type="button" role="menuitem" onClick={() => resolveStackingConflicts(paneConflictIds)}>
+                      Update all to resolve
+                    </button>
+                    <button type="button" role="menuitem" onClick={() => ignoreStackingConflicts(paneConflictIds)}>
+                      Temporarily ignore all
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+            <button className="primary-button table-footer-button" type="button" onClick={() => handleSave(paneId)} disabled={shouldShowLoading || isPaneSaving || isPaneImporting}>
               {isPaneSaving ? "Saving" : "Save"}
             </button>
           </div>
@@ -1891,7 +5317,12 @@ export default function App() {
     const isTablePaneBusy = paneType === "table" && (savingTablePaneId === paneId || (activeSpreadsheetImportPaneId === paneId && isImporting));
 
     return (
-      <div className={`workspace-pane-shell${showResizePreview ? " is-resizing" : ""}`}>
+      <div
+        className={`workspace-pane-shell${showResizePreview ? " is-resizing" : ""}`}
+        onFocusCapture={() => activateWorkspacePane(paneId, paneType)}
+        onPointerDownCapture={() => activateWorkspacePane(paneId, paneType)}
+        onPointerEnter={() => activateWorkspacePane(paneId, paneType)}
+      >
         {showResizePreview ? (
           <div className="workspace-pane-resize-preview" aria-hidden="true">
             <span className="workspace-pane-resize-preview-icon">
@@ -1919,6 +5350,84 @@ export default function App() {
   function renderTableOverlays() {
     return (
       <>
+        {spreadsheetSettingsPaneId && (
+          <div className="spreadsheet-settings-layer" role="presentation">
+            <section
+              className="spreadsheet-settings-dialog"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="spreadsheet-settings-title"
+            >
+              <header className="spreadsheet-settings-header">
+                <h3 id="spreadsheet-settings-title">Spreadsheet Settings</h3>
+              </header>
+              <div className="spreadsheet-settings-body">
+                <label className="spreadsheet-settings-field" htmlFor="spreadsheet-calculate-subtotals">
+                  <span>Calculate subtotals</span>
+                  <select
+                    id="spreadsheet-calculate-subtotals"
+                    value={draftSpreadsheetSettings.calculateSubtotals}
+                    onChange={(event) =>
+                      setDraftSpreadsheetSettings((settings) => ({
+                        ...settings,
+                        calculateSubtotals: event.target.value,
+                      }))
+                    }
+                  >
+                    {LEVEL_OF_DETAIL_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="spreadsheet-settings-field" htmlFor="spreadsheet-view">
+                  <span>View</span>
+                  <select
+                    id="spreadsheet-view"
+                    value={draftSpreadsheetSettings.view}
+                    onChange={(event) =>
+                      setDraftSpreadsheetSettings((settings) => ({
+                        ...settings,
+                        view: event.target.value,
+                      }))
+                    }
+                  >
+                    {SPREADSHEET_VIEW_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <button
+                  className={`spreadsheet-toggle-button${draftSpreadsheetSettings.distributeIdenticalRooms ? " is-on" : ""}`}
+                  type="button"
+                  aria-pressed={draftSpreadsheetSettings.distributeIdenticalRooms}
+                  onClick={() =>
+                    setDraftSpreadsheetSettings((settings) => ({
+                      ...settings,
+                      distributeIdenticalRooms: !settings.distributeIdenticalRooms,
+                    }))
+                  }
+                >
+                  <span>Distribute Identical Rooms</span>
+                </button>
+              </div>
+              <footer className="spreadsheet-settings-footer">
+                <button className="secondary-button table-footer-button" type="button" onClick={closeSpreadsheetSettings}>
+                  Cancel
+                </button>
+                <button className="primary-button table-footer-button" type="button" onClick={saveSpreadsheetSettings}>
+                  Save
+                </button>
+              </footer>
+            </section>
+          </div>
+        )}
+
         {isAdvancedSortOpen && (
           <div className="advanced-sort-layer" role="presentation">
             <section
@@ -2073,6 +5582,12 @@ export default function App() {
         onChange={handleProjectImportChange}
       />
 
+      {saveBannerKey > 0 && (
+        <div key={saveBannerKey} className="save-banner" role="status" aria-live="polite">
+          Saved
+        </div>
+      )}
+
       <div className={`app-content${isStartDialogOpen ? " is-blurred" : ""}`} aria-hidden={isStartDialogOpen ? "true" : undefined}>
         {!isWorkspaceActive && (
           <div className="workspace-home">
@@ -2099,11 +5614,7 @@ export default function App() {
                     aria-label="Open diagrams"
                     style={{ "--tool-angle": "90deg", "--tool-counter-angle": "-90deg" }}
                   >
-                    <svg className="diagrams-icon" viewBox="0 0 18 18" aria-hidden="true" focusable="false">
-                      <rect x="2.4" y="4.4" width="6.6" height="2.8" rx="0.75" />
-                      <rect x="7.6" y="6" width="2.8" height="6" rx="0.75" />
-                      <rect x="8.8" y="10.8" width="6.8" height="2.8" rx="0.75" />
-                    </svg>
+                    {renderDiagramsIcon()}
                   </button>
                 </div>
               )}
@@ -2123,7 +5634,7 @@ export default function App() {
         )}
 
         {isWorkspaceActive && (
-          <div className="workspace-app-shell">
+          <div className={`workspace-app-shell${sideToolMenu ? " is-side-menu-open" : ""}`}>
             {renderSideStrip("left")}
             <div
               ref={workspaceDisplayRef}
@@ -2152,191 +5663,9 @@ export default function App() {
           </div>
         )}
 
-        {false && isDiagramsOpen && (
-          <div className="workspace-app-shell">
-            <aside className="workspace-side-strip" aria-label="Left workspace actions">
-              <button className="workspace-add-button workspace-side-add-button" type="button" onClick={openWorkspaceMenuFromApp} aria-label="Add interface">
-                <svg className="plus-icon" viewBox="0 0 18 18" aria-hidden="true" focusable="false">
-                  <path d="M8 3h2v5h5v2h-5v5H8v-5H3V8h5z" />
-                </svg>
-              </button>
-            </aside>
-            <section className="diagrams-panel diagrams-app" id="diagrams-panel" aria-labelledby="diagrams-title">
-            <header className="diagrams-panel-header">
-              <h2 id="diagrams-title">Diagrams</h2>
-              <button className="secondary-button diagrams-close-button" type="button" onClick={closeDiagrams}>
-                Close
-              </button>
-            </header>
-            <div className="diagrams-panel-tabs" role="tablist" aria-label="Diagram views">
-              <button
-                className={`diagrams-tab${activeDiagramView === "stacking" ? " is-active" : ""}`}
-                type="button"
-                role="tab"
-                aria-selected={activeDiagramView === "stacking"}
-                onClick={() => setActiveDiagramView("stacking")}
-              >
-                Stacking
-              </button>
-              <button
-                className={`diagrams-tab${activeDiagramView === "areas" ? " is-active" : ""}`}
-                type="button"
-                role="tab"
-                aria-selected={activeDiagramView === "areas"}
-                onClick={() => setActiveDiagramView("areas")}
-              >
-                Areas
-              </button>
-            </div>
-            <div className="diagrams-panel-body" role="tabpanel" aria-label={activeDiagramView === "stacking" ? "Stacking" : "Areas"}>
-              {activeDiagramView === "stacking" && (
-                <div className="diagrams-settings" aria-label="Stacking diagram settings">
-                  <label className="diagrams-field">
-                    <span>Default Floor-to-Floor Height:</span>
-                    <span className="diagrams-height-inputs">
-                      <input
-                        className="diagrams-number-input"
-                        type="number"
-                        inputMode="numeric"
-                        min="0"
-                        step="1"
-                        value={stackingSettings.defaultFloorToFloorFeet}
-                        aria-label="Default floor-to-floor height feet"
-                        onChange={(event) =>
-                          setStackingSettings((settings) => ({
-                            ...settings,
-                            defaultFloorToFloorFeet: event.target.value,
-                          }))
-                        }
-                      />
-                      <span aria-hidden="true">'</span>
-                      <input
-                        className="diagrams-number-input"
-                        type="number"
-                        inputMode="numeric"
-                        min="0"
-                        max="11"
-                        step="1"
-                        value={stackingSettings.defaultFloorToFloorInches}
-                        aria-label="Default floor-to-floor height inches"
-                        onChange={(event) =>
-                          setStackingSettings((settings) => ({
-                            ...settings,
-                            defaultFloorToFloorInches: event.target.value,
-                          }))
-                        }
-                      />
-                      <span aria-hidden="true">"</span>
-                    </span>
-                  </label>
+        {!isWorkspaceActive && renderProjectMenuButton()}
 
-                  <label className="diagrams-field">
-                    <span>Level of Detail:</span>
-                    <select
-                      value={stackingSettings.levelOfDetail}
-                      onChange={(event) =>
-                        setStackingSettings((settings) => ({
-                          ...settings,
-                          levelOfDetail: event.target.value,
-                        }))
-                      }
-                    >
-                      <option value="functionalGroup">Functional Group</option>
-                      <option value="departmentFunction">Department Function</option>
-                      <option value="department">Department</option>
-                      <option value="functionalArea">Functional Area</option>
-                      <option value="room">Room</option>
-                    </select>
-                  </label>
-
-                  <label className="diagrams-field">
-                    <span>Text Size:</span>
-                    <input
-                      className="diagrams-number-input"
-                      type="number"
-                      inputMode="decimal"
-                      min="0"
-                      step="0.1"
-                      value={stackingSettings.textSize}
-                      onChange={(event) =>
-                        setStackingSettings((settings) => ({
-                          ...settings,
-                          textSize: event.target.value,
-                        }))
-                      }
-                    />
-                  </label>
-
-                  <button
-                    className={`diagrams-toggle-button${stackingSettings.grossSquareFootage ? " is-on" : ""}`}
-                    type="button"
-                    aria-pressed={stackingSettings.grossSquareFootage}
-                    onClick={() =>
-                      setStackingSettings((settings) => ({
-                        ...settings,
-                        grossSquareFootage: !settings.grossSquareFootage,
-                      }))
-                    }
-                  >
-                    <span>Gross Square Footage</span>
-                  </button>
-
-                  <button
-                    className={`diagrams-toggle-button${stackingSettings.netSquareFootage ? " is-on" : ""}`}
-                    type="button"
-                    aria-pressed={stackingSettings.netSquareFootage}
-                    onClick={() =>
-                      setStackingSettings((settings) => ({
-                        ...settings,
-                        netSquareFootage: !settings.netSquareFootage,
-                      }))
-                    }
-                  >
-                    <span>Net Square Footage</span>
-                  </button>
-                </div>
-              )}
-            </div>
-            </section>
-            <aside className="workspace-side-strip" aria-label="Right workspace actions">
-              <button className="workspace-add-button workspace-side-add-button" type="button" onClick={openWorkspaceMenuFromApp} aria-label="Add interface">
-                <svg className="plus-icon" viewBox="0 0 18 18" aria-hidden="true" focusable="false">
-                  <path d="M8 3h2v5h5v2h-5v5H8v-5H3V8h5z" />
-                </svg>
-              </button>
-            </aside>
-          </div>
-        )}
-
-        <button className="project-menu-button" type="button" onClick={toggleProjectMenu} aria-label="Project menu" aria-expanded={isProjectMenuOpen}>
-          <svg className="dots-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <circle cx="5" cy="12" r="2" />
-            <circle cx="12" cy="12" r="2" />
-            <circle cx="19" cy="12" r="2" />
-          </svg>
-        </button>
-
-        {isProjectMenuOpen && (
-          <div className="project-actions-menu" role="menu" onClick={(event) => event.stopPropagation()}>
-            <button type="button" role="menuitem" onClick={openProjectImportPicker} disabled={isImporting}>
-              Import Project
-            </button>
-            <button type="button" role="menuitem" onClick={exportProjectFile} disabled={isProjectSaving || isImporting}>
-              Export Project
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setIsProjectMenuOpen(false);
-                saveProjectToBackend();
-              }}
-              disabled={isProjectSaving || isImporting}
-            >
-              Save Project
-            </button>
-          </div>
-        )}
+        {!isWorkspaceActive && isProjectMenuOpen && renderProjectActionsMenu()}
 
         {columnMenu && (
           <div
@@ -2351,257 +5680,6 @@ export default function App() {
           </div>
         )}
 
-        {false && isTableOpen && (
-          <div className="modal-layer workspace-app-shell" role="presentation">
-            <aside className="workspace-side-strip" aria-label="Left workspace actions">
-              <button className="workspace-add-button workspace-side-add-button" type="button" onClick={openWorkspaceMenuFromApp} aria-label="Add interface">
-                <svg className="plus-icon" viewBox="0 0 18 18" aria-hidden="true" focusable="false">
-                  <path d="M8 3h2v5h5v2h-5v5H8v-5H3V8h5z" />
-                </svg>
-              </button>
-            </aside>
-            <section className="table-modal table-app" role="region" aria-labelledby="program-table-title">
-              <header className="table-modal-header">
-                <input
-                  id="program-table-title"
-                  className="program-title-input"
-                  value={draftProjectName}
-                  onChange={(event) => setDraftProjectName(event.target.value)}
-                  aria-label="Program title"
-                />
-                <div className="modal-metrics" aria-label="Program data totals">
-                  <span className="metric-container">{draftRows.length.toLocaleString()} rows</span>
-                  <span className="metric-container">Total NSF: {formatArea(totals.totalNsf)}</span>
-                </div>
-              </header>
-
-              <div className="table-shell">
-                {isLoading ? (
-                  <div className="empty-state">{isImporting ? "Importing" : "Loading"}</div>
-                ) : errorMessage && draftRows.length === 0 ? (
-                  <div className="empty-state">{errorMessage}</div>
-                ) : (
-                  <table className="program-table">
-                    <thead>
-                      <tr>
-                        {columns.map((column) => (
-                          <th
-                            className={column.className}
-                            key={column.key}
-                            scope="col"
-                            aria-sort={getAriaSort(column.key, sortConfig)}
-                            onContextMenu={(event) => openColumnMenu(event, column.key)}
-                          >
-                            <button className="column-sort-button" type="button" onClick={() => handleSort(column.key)}>
-                              <span className="column-label">{column.label}</span>
-                              <span className={`sort-icon ${getSortIconClass(column.key, sortConfig)}`} aria-hidden="true">
-                                <span className="sort-triangle sort-triangle-up" />
-                                <span className="sort-triangle sort-triangle-down" />
-                              </span>
-                            </button>
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sortedRows.map((row) => {
-                        const totalNsf = computeTotalNsf(row.quantity, row.nsfPerUnit);
-
-                        return (
-                          <tr key={row.id}>
-                            {columns.map((column) => {
-                              const cellClassName = [column.className, getTableCellClassName(row.id, column.key)]
-                                .filter(Boolean)
-                                .join(" ");
-
-                              return (
-                                <td
-                                  className={cellClassName}
-                                  key={column.key}
-                                  onMouseDown={(event) => handleTableCellMouseDown(event, row.id, column.key)}
-                                >
-                                  {column.key === "totalNsf" ? (
-                                    <output aria-label={getCellAriaLabel(row, column)}>{formatArea(totalNsf)}</output>
-                                  ) : (
-                                    <input
-                                      value={row[column.key]}
-                                      inputMode={getCellInputMode(column.key)}
-                                      onChange={(event) => updateRow(row.id, column.key, event.target.value)}
-                                      onFocus={() => selectSingleTableCell(row.id, column.key)}
-                                      aria-label={getCellAriaLabel(row, column)}
-                                    />
-                                  )}
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-
-              <footer className="table-modal-footer">
-                <div className="footer-left-actions">
-                  <button className="secondary-button" type="button" onClick={openSpreadsheetImportPicker} disabled={isSaving || isImporting}>
-                    {isImporting ? "Importing" : "Import"}
-                  </button>
-                  <div className="save-status" role="status">
-                    {errorMessage || statusMessage}
-                  </div>
-                </div>
-                <div className="footer-actions">
-                  <button className="secondary-button" type="button" onClick={requestTableClose} disabled={isSaving || isImporting}>
-                    Cancel
-                  </button>
-                  <button className="primary-button" type="button" onClick={handleSave} disabled={isLoading || isSaving || isImporting}>
-                    {isSaving ? "Saving" : "Save"}
-                  </button>
-                </div>
-              </footer>
-            </section>
-            <aside className="workspace-side-strip" aria-label="Right workspace actions">
-              <button className="workspace-add-button workspace-side-add-button" type="button" onClick={openWorkspaceMenuFromApp} aria-label="Add interface">
-                <svg className="plus-icon" viewBox="0 0 18 18" aria-hidden="true" focusable="false">
-                  <path d="M8 3h2v5h5v2h-5v5H8v-5H3V8h5z" />
-                </svg>
-              </button>
-            </aside>
-
-            {isAdvancedSortOpen && (
-              <div className="advanced-sort-layer" role="presentation">
-                <section
-                  className="advanced-sort-dialog"
-                  role="dialog"
-                  aria-modal="true"
-                  aria-labelledby="advanced-sort-title"
-                >
-                  <header className="advanced-sort-header">
-                    <h3 id="advanced-sort-title">Advanced Sorting</h3>
-                  </header>
-
-                  <div className="advanced-sort-body">
-                    <div className="advanced-sort-list" role="listbox" aria-label="Advanced sorting priority">
-                      {advancedDraftRules.map((rule, index) => {
-                        const isSelected = selectedRuleKeySet.has(rule.key);
-
-                        return (
-                          <div
-                            className={`advanced-sort-row${rule.enabled ? "" : " is-disabled"}${isSelected ? " is-selected" : ""}${draggingRuleKey === rule.key ? " is-dragging" : ""}`}
-                            key={rule.key}
-                            role="option"
-                            aria-selected={isSelected}
-                            onClick={(event) => selectAdvancedRule(event, rule.key)}
-                            onDragOver={(event) => handleRuleDragOver(event, rule.key)}
-                            onDrop={handleRuleDrop}
-                          >
-                            <span className="advanced-sort-rank">{index + 1}</span>
-                            <span className="advanced-sort-name">{rule.label}</span>
-                            <button
-                              className="advanced-drag-handle"
-                              type="button"
-                              draggable
-                              aria-label={`Reorder ${rule.label}`}
-                              onClick={(event) => event.stopPropagation()}
-                              onDragStart={(event) => handleRuleDragStart(event, rule.key)}
-                              onDragEnd={() => setDraggingRuleKey(null)}
-                            >
-                              <span />
-                              <span />
-                              <span />
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    <div className="advanced-sort-side-actions">
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        onClick={() => applyAdvancedRuleEnabled(true)}
-                        disabled={selectedRuleKeys.length === 0}
-                      >
-                        Enable (E)
-                      </button>
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        onClick={() => applyAdvancedRuleEnabled(false)}
-                        disabled={selectedRuleKeys.length === 0}
-                      >
-                        Disable (D)
-                      </button>
-                    </div>
-                  </div>
-
-                  <footer className="advanced-sort-footer">
-                    <button className="secondary-button" type="button" onClick={requestAdvancedSortClose}>
-                      Cancel
-                    </button>
-                    <button className="primary-button" type="button" onClick={saveAdvancedSort}>
-                      Save
-                    </button>
-                  </footer>
-
-                  {isAdvancedCancelConfirmOpen && (
-                    <div className="confirm-layer advanced-confirm-layer" role="presentation">
-                      <section
-                        className="confirm-dialog"
-                        role="alertdialog"
-                        aria-modal="true"
-                        aria-labelledby="advanced-cancel-title"
-                        aria-describedby="advanced-cancel-description"
-                      >
-                        <h3 id="advanced-cancel-title">Cancel edits?</h3>
-                        <p id="advanced-cancel-description">Your advanced sorting changes will not be saved.</p>
-                        <div className="confirm-actions">
-                          <button className="danger-button" type="button" onClick={closeAdvancedSortDialog}>
-                            Cancel Edits
-                          </button>
-                          <button className="secondary-button" type="button" onClick={() => setIsAdvancedCancelConfirmOpen(false)}>
-                            Keep Editing
-                          </button>
-                        </div>
-                      </section>
-                    </div>
-                  )}
-                </section>
-              </div>
-            )}
-
-            {isExitConfirmOpen && (
-              <div className="confirm-layer" role="presentation">
-                <section
-                  className="confirm-dialog"
-                  role="alertdialog"
-                  aria-modal="true"
-                  aria-labelledby="exit-confirm-title"
-                  aria-describedby="exit-confirm-description"
-                >
-                  <h3 id="exit-confirm-title">Cancel edits?</h3>
-                  <p id="exit-confirm-description">Your changes will not be saved.</p>
-                  <div className="confirm-actions">
-                    <button className="danger-button" type="button" onClick={closeTable}>
-                      Cancel Edits
-                    </button>
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      onClick={() => {
-                        setIsToolMenuOpen(false);
-                        setIsExitConfirmOpen(false);
-                      }}
-                    >
-                      Keep Editing
-                    </button>
-                  </div>
-                </section>
-              </div>
-            )}
-          </div>
-        )}
       </div>
 
       {isStartDialogOpen && (
@@ -2625,6 +5703,1938 @@ export default function App() {
       )}
     </main>
   );
+}
+
+const STACKING_COLOR_PALETTE = [
+  "#ff8a65",
+  "#66dc8a",
+  "#4dabf7",
+  "#ffd166",
+  "#b197fc",
+  "#36d6d0",
+  "#ff8fab",
+  "#9be15d",
+  "#ffa94d",
+  "#6ee7b7",
+  "#f783ac",
+  "#74c0fc",
+];
+
+const STACKING_MIN_DIMENSION_FEET = 0.25;
+const STACKING_MIN_ZOOM = 0.35;
+const STACKING_MAX_ZOOM = 4;
+const STACKING_ZOOM_FACTOR = 1.18;
+const STACKING_DIMENSION_EXTENSION_GAP = 7;
+const STACKING_DIMENSION_EXTENSION_OVERHANG = 7;
+const STACKING_DIMENSION_LABEL_WIDTH = 78;
+const STACKING_DIMENSION_LABEL_HEIGHT = 22;
+const STACKING_DIMENSION_LABEL_TEXT_PADDING = 5;
+const STACKING_DIMENSION_LABEL_LINE_GAP = 4;
+const STACKING_DIMENSION_LABEL_FONT = "700 10px Arial, sans-serif";
+
+function StackingDiagramCanvas({ diagram, onDiagramChange, onSegmentFloorChange }) {
+  const frameRef = useRef(null);
+  const canvasRef = useRef(null);
+  const lastCanvasPointRef = useRef(null);
+  const isCanvasPointerInsideRef = useRef(false);
+  const skipDimensionBlurCommitRef = useRef(null);
+  const [canvasSize, setCanvasSize] = useState({ width: 1, height: 1 });
+  const [view, setView] = useState({ zoom: 1, offset: { x: 0, y: 0 } });
+  const [dimensionDrafts, setDimensionDrafts] = useState({});
+  const [editingDimensionKey, setEditingDimensionKey] = useState(null);
+  const [isPanToolActive, setIsPanToolActive] = useState(false);
+  const [panDrag, setPanDrag] = useState(null);
+  const [segmentDrag, setSegmentDrag] = useState(null);
+  const [hoveredSegment, setHoveredSegment] = useState(null);
+  const hasDiagram = Boolean(diagram?.floors?.length);
+  const layout = useMemo(
+    () => getStackingDiagramLayout(diagram, canvasSize, view.zoom, view.offset),
+    [diagram, canvasSize, view.zoom, view.offset],
+  );
+  const segmentHitRegions = useMemo(
+    () => getStackingSegmentHitRegions(diagram, layout),
+    [diagram, layout],
+  );
+  const dragPreview = useMemo(
+    () => getStackingDragPreview(diagram, layout, segmentDrag),
+    [diagram, layout, segmentDrag],
+  );
+  const displayedDiagram = dragPreview?.diagram ?? diagram;
+  const displayedLayout = useMemo(
+    () => (dragPreview ? getStackingDiagramLayout(displayedDiagram, canvasSize, view.zoom, view.offset) : layout),
+    [canvasSize, displayedDiagram, dragPreview, layout, view.offset, view.zoom],
+  );
+
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return undefined;
+
+    const updateSize = () => {
+      const rect = frame.getBoundingClientRect();
+      setCanvasSize({
+        width: Math.max(1, Math.round(rect.width)),
+        height: Math.max(1, Math.round(rect.height)),
+      });
+    };
+
+    updateSize();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateSize);
+      return () => window.removeEventListener("resize", updateSize);
+    }
+
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(frame);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    drawStackingDiagram(canvasRef.current, displayedDiagram, canvasSize, displayedLayout, { dragPreview });
+  }, [displayedDiagram, canvasSize, displayedLayout, dragPreview]);
+
+  useEffect(() => {
+    setDimensionDrafts({});
+    setEditingDimensionKey(null);
+    setPanDrag(null);
+    setSegmentDrag(null);
+    setHoveredSegment(null);
+    setView({ zoom: 1, offset: { x: 0, y: 0 } });
+  }, [diagram?.projectName, diagram?.floors?.length]);
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (!hasDiagram || !isSpaceKey(event) || isEditableEventTarget(event.target)) return;
+      if (!isCanvasPointerInsideRef.current && !frameRef.current?.contains(document.activeElement)) return;
+      event.preventDefault();
+      setIsPanToolActive(true);
+    };
+
+    const handleKeyUp = (event) => {
+      if (!isSpaceKey(event)) return;
+      if (isPanToolActive) event.preventDefault();
+      setIsPanToolActive(false);
+      setPanDrag(null);
+    };
+
+    const handleWindowBlur = () => {
+      setIsPanToolActive(false);
+      setPanDrag(null);
+    };
+
+    window.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", handleWindowBlur);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", handleWindowBlur);
+    };
+  }, [hasDiagram, isPanToolActive]);
+
+  const getCanvasPoint = (event) => {
+    const frame = frameRef.current;
+    if (!frame) return { x: canvasSize.width / 2, y: canvasSize.height / 2 };
+    const rect = frame.getBoundingClientRect();
+    return {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    };
+  };
+
+  const getZoomAnchorPoint = (point) => point ?? lastCanvasPointRef.current ?? {
+    x: canvasSize.width / 2,
+    y: canvasSize.height / 2,
+  };
+
+  const updateZoom = (updater, anchorPoint) => {
+    if (!hasDiagram) return;
+
+    setView((currentView) => {
+      const nextZoom = clamp(updater(currentView.zoom), STACKING_MIN_ZOOM, STACKING_MAX_ZOOM);
+      if (nextZoom === currentView.zoom) return currentView;
+
+      return {
+        zoom: nextZoom,
+        offset: getStackingZoomedViewOffset(
+          diagram,
+          canvasSize,
+          currentView.zoom,
+          nextZoom,
+          currentView.offset,
+          getZoomAnchorPoint(anchorPoint),
+        ),
+      };
+    });
+  };
+
+  const handleWheel = (event) => {
+    if (!hasDiagram || segmentDrag) return;
+    event.preventDefault();
+    const point = getCanvasPoint(event);
+    lastCanvasPointRef.current = point;
+    updateZoom((currentZoom) => currentZoom * (event.deltaY < 0 ? STACKING_ZOOM_FACTOR : 1 / STACKING_ZOOM_FACTOR), point);
+  };
+
+  const handlePointerEnter = (event) => {
+    isCanvasPointerInsideRef.current = true;
+    if (shouldTrackCanvasPoint(event.target)) lastCanvasPointRef.current = getCanvasPoint(event);
+  };
+
+  const handlePointerLeave = () => {
+    setHoveredSegment(null);
+    if (!panDrag && !segmentDrag) isCanvasPointerInsideRef.current = false;
+  };
+
+  const updatePointerInsideFromEvent = (event) => {
+    const frame = frameRef.current;
+    if (!frame) return;
+
+    const rect = frame.getBoundingClientRect();
+    isCanvasPointerInsideRef.current =
+      event.clientX >= rect.left &&
+      event.clientX <= rect.right &&
+      event.clientY >= rect.top &&
+      event.clientY <= rect.bottom;
+  };
+
+  const handlePointerMove = (event) => {
+    updatePointerInsideFromEvent(event);
+    const canTrackCanvasPoint = shouldTrackCanvasPoint(event.target);
+    const trackedPoint = canTrackCanvasPoint ? getCanvasPoint(event) : null;
+    if (trackedPoint) lastCanvasPointRef.current = trackedPoint;
+
+    if (segmentDrag) {
+      if (event.pointerId !== segmentDrag.pointerId) return;
+      event.preventDefault();
+      const point = getCanvasPoint(event);
+      setSegmentDrag((currentDrag) =>
+        currentDrag && currentDrag.pointerId === event.pointerId
+          ? {
+              ...currentDrag,
+              currentPoint: point,
+            }
+          : currentDrag,
+      );
+      return;
+    }
+
+    if (panDrag) {
+      if (event.pointerId !== panDrag.pointerId) return;
+      event.preventDefault();
+
+      const deltaX = event.clientX - panDrag.startClientX;
+      const deltaY = event.clientY - panDrag.startClientY;
+      setView((currentView) => ({
+        ...currentView,
+        offset: {
+          x: panDrag.startOffset.x + deltaX,
+          y: panDrag.startOffset.y + deltaY,
+        },
+      }));
+      return;
+    }
+
+    if (!canTrackCanvasPoint || isPanToolActive) {
+      setHoveredSegment(null);
+      return;
+    }
+
+    const hitRegion = findStackingSegmentHitRegion(segmentHitRegions, trackedPoint);
+    setHoveredSegment(hitRegion ? { floorKey: hitRegion.floorKey, segmentIndex: hitRegion.segmentIndex } : null);
+  };
+
+  const handlePointerDown = (event) => {
+    if (!hasDiagram || event.button !== 0 || !shouldTrackCanvasPoint(event.target)) return;
+
+    const point = getCanvasPoint(event);
+    lastCanvasPointRef.current = point;
+
+    if (!isPanToolActive) {
+      const hitRegion = findStackingSegmentHitRegion(segmentHitRegions, point);
+      if (!hitRegion) {
+        setHoveredSegment(null);
+        return;
+      }
+
+      event.preventDefault();
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      setHoveredSegment(null);
+      setSegmentDrag(createStackingSegmentDrag(event.pointerId, hitRegion, point));
+      return;
+    }
+
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setPanDrag({
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startOffset: view.offset,
+    });
+  };
+
+  const endSegmentDrag = (event) => {
+    if (!segmentDrag || event.pointerId !== segmentDrag.pointerId) return false;
+
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    updatePointerInsideFromEvent(event);
+
+    const completedDrag = {
+      ...segmentDrag,
+      currentPoint: getCanvasPoint(event),
+    };
+    const completedPreview = getStackingDragPreview(diagram, layout, completedDrag);
+
+    if (isStackingDragCommitChange(completedPreview, completedDrag)) {
+      onDiagramChange?.(completedPreview.diagram);
+      if (completedPreview.targetFloorKey !== completedDrag.sourceFloorKey) {
+        onSegmentFloorChange?.({
+          segment: completedPreview.draggedSegment,
+          sourceFloor: getStackingFloorByKey(diagram, completedDrag.sourceFloorKey),
+          sourceFloorKey: completedDrag.sourceFloorKey,
+          targetFloor: getStackingFloorByKey(diagram, completedPreview.targetFloorKey),
+          targetFloorKey: completedPreview.targetFloorKey,
+        });
+      }
+    }
+
+    setSegmentDrag(null);
+    setHoveredSegment(null);
+    return true;
+  };
+
+  const endPanDrag = (event) => {
+    if (!panDrag || event.pointerId !== panDrag.pointerId) return false;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    updatePointerInsideFromEvent(event);
+    setPanDrag(null);
+    return true;
+  };
+
+  const endPointerDrag = (event) => {
+    if (endSegmentDrag(event)) return;
+    endPanDrag(event);
+  };
+
+  const cancelPointerDrag = (event) => {
+    if (segmentDrag && event.pointerId === segmentDrag.pointerId) {
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+      setSegmentDrag(null);
+      setHoveredSegment(null);
+      return;
+    }
+
+    endPanDrag(event);
+  };
+
+  const handleLostPointerCapture = () => {
+    setPanDrag(null);
+    setSegmentDrag(null);
+    setHoveredSegment(null);
+  };
+
+  const clearDimensionDraft = (dimensionKey) => {
+    setDimensionDrafts((drafts) => {
+      if (!(dimensionKey in drafts)) return drafts;
+      const { [dimensionKey]: _draft, ...remainingDrafts } = drafts;
+      return remainingDrafts;
+    });
+  };
+
+  const finishDimensionEdit = (dimensionKey) => {
+    clearDimensionDraft(dimensionKey);
+    setEditingDimensionKey((currentKey) => (currentKey === dimensionKey ? null : currentKey));
+  };
+
+  const commitDimensionEdit = (dimension, value) => {
+    const parsedValue = parseDimensionInputValue(value);
+    if (parsedValue != null && diagram) {
+      onDiagramChange?.(updateStackingDiagramDimension(diagram, dimension, parsedValue), {
+        dimension,
+        value: parsedValue,
+      });
+    }
+    finishDimensionEdit(dimension.key);
+  };
+
+  const handleDimensionChange = (dimension, value) => {
+    setDimensionDrafts((drafts) => ({
+      ...drafts,
+      [dimension.key]: value,
+    }));
+  };
+
+  const handleDimensionBlur = (event, dimension) => {
+    if (skipDimensionBlurCommitRef.current === dimension.key) {
+      skipDimensionBlurCommitRef.current = null;
+      finishDimensionEdit(dimension.key);
+      return;
+    }
+
+    commitDimensionEdit(dimension, event.currentTarget.value);
+  };
+
+  const beginDimensionEdit = (dimension) => {
+    setEditingDimensionKey(dimension.key);
+    setDimensionDrafts((drafts) => ({
+      ...drafts,
+      [dimension.key]: drafts[dimension.key] ?? formatDimensionInputValue(dimension.value),
+    }));
+  };
+
+  const handleDimensionKeyDown = (event, dimension) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.currentTarget.blur();
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      skipDimensionBlurCommitRef.current = dimension.key;
+      event.currentTarget.blur();
+      finishDimensionEdit(dimension.key);
+    }
+  };
+
+  return (
+    <div
+      ref={frameRef}
+      className={`diagrams-canvas${isPanToolActive ? " is-pan-tool-active" : ""}${panDrag ? " is-panning" : ""}${hoveredSegment ? " is-segment-hovered" : ""}${segmentDrag ? " is-dragging-segment" : ""}`}
+      aria-label="Diagram canvas"
+      onWheel={handleWheel}
+      onPointerEnter={handlePointerEnter}
+      onPointerLeave={handlePointerLeave}
+      onPointerMove={handlePointerMove}
+      onPointerDown={handlePointerDown}
+      onPointerUp={endPointerDrag}
+      onPointerCancel={cancelPointerDrag}
+      onLostPointerCapture={handleLostPointerCapture}
+    >
+      <canvas ref={canvasRef} className="diagrams-canvas-surface" />
+      {hasDiagram && (
+        <div className="diagrams-canvas-toolbar" aria-label="Canvas zoom controls">
+          <button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => updateZoom((currentZoom) => currentZoom / STACKING_ZOOM_FACTOR)}>
+            -
+          </button>
+          <output aria-label="Canvas zoom">{Math.round(view.zoom * 100)}%</output>
+          <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => updateZoom((currentZoom) => currentZoom * STACKING_ZOOM_FACTOR)}>
+            +
+          </button>
+          <button type="button" aria-label="Fit diagram" title="Fit diagram" onClick={() => setView({ zoom: 1, offset: { x: 0, y: 0 } })}>
+            Fit
+          </button>
+        </div>
+      )}
+      {hasDiagram && (
+        <div className="diagrams-canvas-overlay" aria-label="Editable diagram dimensions">
+          {displayedLayout.dimensionInputs.map((dimension) => {
+            const formattedValue = formatDimensionInputValue(dimension.value);
+            const isEditing = editingDimensionKey === dimension.key;
+            const displayValue = dimensionDrafts[dimension.key] ?? formattedValue;
+
+            return (
+              <div
+                key={dimension.key}
+                className={`stacking-dimension-field is-${dimension.orientation} is-${dimension.kind}${isEditing ? " is-editing" : ""}`}
+                style={{
+                  left: `${dimension.left}px`,
+                  top: `${dimension.top}px`,
+                  "--dimension-field-width": isEditing ? getDimensionEditorWidth(displayValue) : `${STACKING_DIMENSION_LABEL_WIDTH}px`,
+                }}
+              >
+                {isEditing ? (
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={displayValue}
+                    aria-label={dimension.ariaLabel}
+                    onChange={(event) => handleDimensionChange(dimension, event.target.value)}
+                    onBlur={(event) => handleDimensionBlur(event, dimension)}
+                    onFocus={(event) => event.target.select()}
+                    onKeyDown={(event) => handleDimensionKeyDown(event, dimension)}
+                    autoFocus
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className="stacking-dimension-value"
+                    aria-label={`${dimension.ariaLabel}: ${formattedValue}`}
+                    onClick={() => beginDimensionEdit(dimension)}
+                  >
+                    {formattedValue}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function isSpaceKey(event) {
+  return event.code === "Space" || event.key === " " || event.key === "Spacebar";
+}
+
+function isEditableEventTarget(target) {
+  return typeof Element !== "undefined" && target instanceof Element && Boolean(target.closest("input, textarea, select, button, [contenteditable='true']"));
+}
+
+function shouldTrackCanvasPoint(target) {
+  return typeof Element !== "undefined" && target instanceof Element && !target.closest(".diagrams-canvas-toolbar, .stacking-dimension-field");
+}
+
+function getStackingSegmentHitRegions(diagram, layout) {
+  if (!diagram?.floors?.length || !layout?.stackItems?.length) return [];
+
+  const regions = [];
+  for (const item of layout.stackItems) {
+    if (item.kind !== "floor" || !item.floor) continue;
+
+    const floor = item.floor;
+    const totalArea = getStackingFloorTotalArea(floor);
+    if (!(totalArea > 0)) continue;
+
+    let x = item.x;
+    for (const [segmentIndex, segment] of (floor.segments ?? []).entries()) {
+      const remainingWidth = item.x + item.width - x;
+      const segmentWidth = segmentIndex === floor.segments.length - 1
+        ? remainingWidth
+        : item.width * (getStackingSegmentArea(segment) / totalArea);
+
+      if (segmentWidth > 0 && item.height > 0) {
+        regions.push({
+          centerX: x + segmentWidth / 2,
+          centerY: item.y + item.height / 2,
+          floor,
+          floorItem: item,
+          floorKey: floor.key,
+          height: item.height,
+          segment,
+          segmentIndex,
+          width: segmentWidth,
+          x,
+          y: item.y,
+        });
+      }
+
+      x += segmentWidth;
+    }
+  }
+
+  return regions;
+}
+
+function findStackingSegmentHitRegion(regions, point) {
+  if (!point) return null;
+
+  for (const region of regions ?? []) {
+    if (
+      point.x >= region.x &&
+      point.x <= region.x + region.width &&
+      point.y >= region.y &&
+      point.y <= region.y + region.height
+    ) {
+      return region;
+    }
+  }
+
+  return null;
+}
+
+function createStackingSegmentDrag(pointerId, hitRegion, point) {
+  const center = {
+    x: hitRegion.centerX,
+    y: hitRegion.centerY,
+  };
+
+  return {
+    currentPoint: point,
+    pointerId,
+    pointerOffset: {
+      x: point.x - center.x,
+      y: point.y - center.y,
+    },
+    segment: { ...hitRegion.segment },
+    sourceFloorKey: hitRegion.floorKey,
+    sourceSegmentIndex: hitRegion.segmentIndex,
+    startCenter: center,
+    startPoint: point,
+    startRect: {
+      height: hitRegion.height,
+      width: hitRegion.width,
+    },
+  };
+}
+
+function getStackingDragPreview(diagram, layout, drag) {
+  if (!diagram?.floors?.length || !layout?.stackItems?.length || !drag) return null;
+
+  const draggedSegment = getStackingDraggedSegment(diagram, drag);
+  if (!draggedSegment) return null;
+
+  const draggedCenter = getStackingDraggedCenter(drag);
+  const sourceFloorItem = getStackingFloorLayoutItem(layout, drag.sourceFloorKey);
+  const isOverSourceFloor = sourceFloorItem ? isStackingYInsideFloorItem(draggedCenter.y, sourceFloorItem) : false;
+  const targetFloorItem = isOverSourceFloor ? sourceFloorItem : getStackingFloorLayoutItemAtY(layout, draggedCenter.y);
+  const targetFloorKey = targetFloorItem?.floor?.key ?? null;
+  const targetSegmentIndex = targetFloorItem
+    ? getStackingDragInsertionIndex(diagram, targetFloorItem, drag, draggedSegment, draggedCenter.x)
+    : null;
+
+  return {
+    diagram: moveStackingSegmentInDiagram(diagram, drag, targetFloorKey, targetSegmentIndex, draggedSegment),
+    draggedCenter,
+    draggedRect: drag.startRect,
+    draggedSegment,
+    targetFloorKey,
+    targetSegmentIndex,
+  };
+}
+
+function getStackingDraggedCenter(drag) {
+  const point = drag.currentPoint ?? drag.startPoint;
+  return {
+    x: point.x - drag.pointerOffset.x,
+    y: point.y - drag.pointerOffset.y,
+  };
+}
+
+function getStackingDraggedSegment(diagram, drag) {
+  const sourceFloor = (diagram?.floors ?? []).find((floor) => floor.key === drag.sourceFloorKey);
+  return sourceFloor?.segments?.[drag.sourceSegmentIndex] ?? drag.segment ?? null;
+}
+
+function getStackingFloorByKey(diagram, floorKey) {
+  return (diagram?.floors ?? []).find((floor) => floor.key === floorKey) ?? null;
+}
+
+function getStackingFloorLayoutItem(layout, floorKey) {
+  return (layout?.stackItems ?? []).find((item) => item.kind === "floor" && item.floor?.key === floorKey) ?? null;
+}
+
+function getStackingFloorLayoutItemAtY(layout, y) {
+  return (layout?.stackItems ?? []).find((item) => item.kind === "floor" && isStackingYInsideFloorItem(y, item)) ?? null;
+}
+
+function isStackingYInsideFloorItem(y, item) {
+  return y >= item.y && y <= item.y + item.height;
+}
+
+function getStackingDragInsertionIndex(diagram, targetFloorItem, drag, draggedSegment, draggedCenterX) {
+  const targetFloorKey = targetFloorItem.floor?.key;
+  const targetFloor = (diagram?.floors ?? []).find((floor) => floor.key === targetFloorKey);
+  if (!targetFloor) return null;
+
+  const otherSegments = getStackingFloorSegmentsWithoutDragged(targetFloor, targetFloorKey, drag);
+  const slotCenters = Array.from({ length: otherSegments.length + 1 }, (_unused, slotIndex) =>
+    getStackingDragSlotCenter(targetFloorItem, otherSegments, draggedSegment, slotIndex),
+  );
+
+  for (let slotIndex = 0; slotIndex < slotCenters.length - 1; slotIndex += 1) {
+    const midpoint = (slotCenters[slotIndex] + slotCenters[slotIndex + 1]) / 2;
+    if (draggedCenterX < midpoint) return slotIndex;
+  }
+
+  return Math.max(0, slotCenters.length - 1);
+}
+
+function getStackingDragSlotCenter(floorItem, otherSegments, draggedSegment, slotIndex) {
+  const segments = [
+    ...otherSegments.slice(0, slotIndex),
+    draggedSegment,
+    ...otherSegments.slice(slotIndex),
+  ];
+  const totalArea = getStackingSegmentsTotalArea(segments);
+
+  if (!(totalArea > 0)) return floorItem.x + floorItem.width / 2;
+
+  let x = floorItem.x;
+  for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
+    const segment = segments[segmentIndex];
+    const remainingWidth = floorItem.x + floorItem.width - x;
+    const segmentWidth = segmentIndex === segments.length - 1
+      ? remainingWidth
+      : floorItem.width * (getStackingSegmentArea(segment) / totalArea);
+
+    if (segmentIndex === slotIndex) return x + segmentWidth / 2;
+    x += segmentWidth;
+  }
+
+  return floorItem.x + floorItem.width / 2;
+}
+
+function getStackingFloorSegmentsWithoutDragged(floor, floorKey, drag) {
+  const segments = floor?.segments ?? [];
+  if (floorKey !== drag.sourceFloorKey) return [...segments];
+  return segments.filter((_segment, segmentIndex) => segmentIndex !== drag.sourceSegmentIndex);
+}
+
+function moveStackingSegmentInDiagram(diagram, drag, targetFloorKey, targetSegmentIndex, draggedSegment) {
+  if (!diagram?.floors?.length || !draggedSegment) return diagram;
+
+  return {
+    ...diagram,
+    floors: diagram.floors.map((floor) => {
+      let segments = [...(floor.segments ?? [])];
+
+      if (floor.key === drag.sourceFloorKey) {
+        segments = segments.filter((_segment, segmentIndex) => segmentIndex !== drag.sourceSegmentIndex);
+      }
+
+      if (floor.key === targetFloorKey && targetSegmentIndex != null) {
+        const insertIndex = clamp(targetSegmentIndex, 0, segments.length);
+        segments = [
+          ...segments.slice(0, insertIndex),
+          { ...draggedSegment },
+          ...segments.slice(insertIndex),
+        ];
+      }
+
+      return normalizeStackingFloorSegments({ ...floor, segments }, diagram.defaultWidth);
+    }),
+  };
+}
+
+function updateStackingDiagramToMatchConflictFloor(diagram, conflict, spreadsheetFloorValue) {
+  if (!diagram?.floors?.length) return { diagram, matched: false, changed: false };
+
+  const segmentLocation = findStackingConflictDiagramSegment(diagram, conflict);
+  if (!segmentLocation) return { diagram, matched: false, changed: false };
+
+  const useSourceFloorMetadata = doFloorValuesMatch(spreadsheetFloorValue, conflict.sourceFloorValue);
+  const floorResult = ensureStackingDiagramFloorForValue(
+    diagram,
+    spreadsheetFloorValue,
+    useSourceFloorMetadata ? conflict.sourceFloorKey : "",
+    useSourceFloorMetadata ? conflict.sourceFloorLabel : "",
+  );
+  if (!floorResult.floorKey) return { diagram, matched: false, changed: false };
+
+  if (segmentLocation.floorKey === floorResult.floorKey) {
+    return {
+      diagram: floorResult.diagram,
+      matched: true,
+      changed: floorResult.diagram !== diagram,
+    };
+  }
+
+  const targetSegmentIndex = getStackingDiagramConflictInsertIndex(
+    floorResult.diagram,
+    floorResult.floorKey,
+    segmentLocation.segment,
+  );
+  const nextDiagram = moveStackingSegmentInDiagram(
+    floorResult.diagram,
+    {
+      sourceFloorKey: segmentLocation.floorKey,
+      sourceSegmentIndex: segmentLocation.segmentIndex,
+    },
+    floorResult.floorKey,
+    targetSegmentIndex,
+    segmentLocation.segment,
+  );
+
+  return {
+    diagram: nextDiagram,
+    matched: true,
+    changed: nextDiagram !== diagram,
+  };
+}
+
+function findStackingConflictDiagramSegment(diagram, conflict) {
+  const conflictRowIds = new Set((conflict.rowIds ?? []).map((rowId) => String(rowId)));
+  const normalizedSegmentLabel = normalizeStackingGroupKey(conflict.segmentLabel ?? "");
+  const preferredFloorKeys = [
+    conflict.targetFloorKey,
+    findStackingDiagramFloorForValue(diagram, conflict.targetFloorValue)?.key,
+  ].filter(Boolean);
+  const orderedFloors = [
+    ...preferredFloorKeys
+      .map((floorKey) => getStackingFloorByKey(diagram, floorKey))
+      .filter(Boolean),
+    ...(diagram.floors ?? []),
+  ];
+  const visitedFloorKeys = new Set();
+  let fallbackMatch = null;
+
+  for (const floor of orderedFloors) {
+    if (!floor || visitedFloorKeys.has(floor.key)) continue;
+    visitedFloorKeys.add(floor.key);
+
+    for (const [segmentIndex, segment] of (floor.segments ?? []).entries()) {
+      const sourceItemIds = new Set((segment.sourceItemIds ?? []).map((rowId) => String(rowId)));
+      const hasSourceItemMatch =
+        conflictRowIds.size > 0 &&
+        [...conflictRowIds].some((rowId) => sourceItemIds.has(rowId));
+      if (hasSourceItemMatch) {
+        return {
+          floorKey: floor.key,
+          segment,
+          segmentIndex,
+        };
+      }
+
+      if (
+        !fallbackMatch &&
+        normalizedSegmentLabel &&
+        normalizeStackingGroupKey(segment.label ?? segment.key ?? "") === normalizedSegmentLabel
+      ) {
+        fallbackMatch = {
+          floorKey: floor.key,
+          segment,
+          segmentIndex,
+        };
+      }
+    }
+  }
+
+  return fallbackMatch;
+}
+
+function ensureStackingDiagramFloorForValue(diagram, floorValue, preferredFloorKey = "", preferredFloorLabel = "") {
+  const existingFloor = findStackingDiagramFloorForValue(diagram, floorValue, preferredFloorKey);
+  if (existingFloor) {
+    return {
+      diagram,
+      floorKey: existingFloor.key,
+    };
+  }
+
+  const floorNumber = floorNumberFromLabel(floorValue) ?? getFiniteNumber(floorValue);
+  if (floorNumber == null) return { diagram, floorKey: null };
+
+  const existingFloorKeys = new Set((diagram.floors ?? []).map((floor) => floor.key));
+  const floorKey = createUniqueStackingFloorKey(String(preferredFloorKey || floorNumber), existingFloorKeys);
+  const floorLabel = preferredFloorLabel && doFloorValuesMatch(preferredFloorLabel, floorValue)
+    ? preferredFloorLabel
+    : `Floor ${formatEditableNumber(floorNumber)}`;
+  const nextFloors = [
+    ...(diagram.floors ?? []),
+    {
+      key: floorKey,
+      number: floorNumber,
+      label: floorLabel,
+      height: getPositiveStackingDimension(diagram.floorHeight, 12),
+      totalArea: 0,
+      segments: [],
+    },
+  ].sort((a, b) => a.number - b.number);
+
+  return {
+    diagram: {
+      ...diagram,
+      floors: nextFloors,
+      slabs: createStackingSlabsForFloors(nextFloors, getPositiveStackingDimension(diagram.slabHeight, 1)),
+    },
+    floorKey,
+  };
+}
+
+function findStackingDiagramFloorForValue(diagram, floorValue, preferredFloorKey = "") {
+  const floors = diagram?.floors ?? [];
+  const preferredFloor = preferredFloorKey ? floors.find((floor) => floor.key === preferredFloorKey) : null;
+  if (preferredFloor && doFloorValuesMatch(getStackingConflictFloorValue(preferredFloor, preferredFloor.key), floorValue)) {
+    return preferredFloor;
+  }
+
+  return floors.find((floor) => doFloorValuesMatch(getStackingConflictFloorValue(floor, floor.key), floorValue)) ?? null;
+}
+
+function createUniqueStackingFloorKey(baseKey, existingFloorKeys) {
+  const normalizedBaseKey = String(baseKey || "floor").trim() || "floor";
+  if (!existingFloorKeys.has(normalizedBaseKey)) return normalizedBaseKey;
+
+  let index = 2;
+  while (existingFloorKeys.has(`${normalizedBaseKey}-${index}`)) index += 1;
+  return `${normalizedBaseKey}-${index}`;
+}
+
+function getStackingDiagramConflictInsertIndex(diagram, targetFloorKey, draggedSegment) {
+  const targetFloor = getStackingFloorByKey(diagram, targetFloorKey);
+  const targetSegments = targetFloor?.segments ?? [];
+  const draggedSortOrder = getFiniteNumber(draggedSegment?.sortOrder);
+  if (draggedSortOrder == null) return targetSegments.length;
+
+  const insertIndex = targetSegments.findIndex((segment) => {
+    const sortOrder = getFiniteNumber(segment?.sortOrder);
+    return sortOrder != null && sortOrder > draggedSortOrder;
+  });
+  return insertIndex === -1 ? targetSegments.length : insertIndex;
+}
+
+function normalizeStackingFloorSegments(floor, diagramWidth) {
+  const width = Math.max(STACKING_MIN_DIMENSION_FEET, getFiniteNumber(diagramWidth) ?? 100);
+  const segments = (floor.segments ?? []).map((segment) => ({ ...segment }));
+  const totalArea = getStackingSegmentsTotalArea(segments);
+
+  return {
+    ...floor,
+    totalArea,
+    segments: segments.map((segment) => ({
+      ...segment,
+      width: totalArea > 0 ? roundArea((getStackingSegmentArea(segment) / totalArea) * width) : 0,
+    })),
+  };
+}
+
+function getStackingSegmentsTotalArea(segments) {
+  return roundArea((segments ?? []).reduce((sum, segment) => sum + getStackingSegmentArea(segment), 0));
+}
+
+function getStackingFloorTotalArea(floor) {
+  const totalArea = getFiniteNumber(floor?.totalArea);
+  if (totalArea != null && totalArea >= 0) return totalArea;
+  return getStackingSegmentsTotalArea(floor?.segments ?? []);
+}
+
+function getStackingSegmentArea(segment) {
+  return Math.max(0, getFiniteNumber(segment?.area) ?? 0);
+}
+
+function isStackingDragCommitChange(preview, drag) {
+  return Boolean(
+    preview?.diagram &&
+    preview.targetFloorKey != null &&
+    preview.targetSegmentIndex != null &&
+    (preview.targetFloorKey !== drag.sourceFloorKey || preview.targetSegmentIndex !== drag.sourceSegmentIndex),
+  );
+}
+
+function buildHealthcareStackingDiagram(programData, settings = createDefaultStackingSettings()) {
+  if (!programData) throw new Error("The selected source could not be loaded.");
+
+  const normalizedSettings = {
+    ...createDefaultStackingSettings(),
+    ...settings,
+  };
+  const feet = Math.max(0, parseEditableNumber(normalizedSettings.defaultFloorToFloorFeet));
+  const inches = clamp(parseEditableNumber(normalizedSettings.defaultFloorToFloorInches), 0, 11);
+  const rawFloorHeight = feet + inches / 12;
+  const floorHeight = rawFloorHeight > 0 ? rawFloorHeight : 12;
+  const slabHeight = parsePositiveDiagramNumber(normalizedSettings.slabHeight, 1);
+  const defaultWidth = parsePositiveDiagramNumber(normalizedSettings.defaultWidth, 100);
+  const textSize = parsePositiveDiagramNumber(normalizedSettings.textSize, 12);
+  const areaMode = normalizedSettings.grossSquareFootage ? "gross" : "net";
+  const departmentsById = new Map((programData.departments ?? []).map((department) => [department.id, department]));
+  const groupsById = new Map((programData.program_groups ?? []).map((group) => [group.id, group]));
+  const floorsById = new Map((programData.floors ?? []).map((floor) => [floor.id, floor]));
+  const floorsByNumber = new Map();
+
+  for (const item of programData.program_items ?? []) {
+    const group = groupsById.get(item.program_group_id);
+    const department = departmentsById.get(group?.department_id ?? item.extensions?.department_id);
+    const diagramFloorId = getProgramItemDiagramFloorId(item);
+    const sourceFloor = floorsById.get(diagramFloorId);
+    const floorNumber = getStackingFloorNumber(item, sourceFloor, diagramFloorId);
+    const floorKey = String(floorNumber);
+    const detail = getStackingDetailForItem(item, group, department, normalizedSettings.levelOfDetail);
+    const netArea = getProgramItemNetArea(item);
+    const grossArea = getProgramItemGrossArea(item, department, netArea);
+    const activeArea = areaMode === "gross" ? grossArea : netArea;
+
+    if (!(activeArea > 0)) continue;
+
+    if (!floorsByNumber.has(floorKey)) {
+      floorsByNumber.set(floorKey, {
+        key: floorKey,
+        number: floorNumber,
+        label: sourceFloor?.name || `Floor ${floorNumber}`,
+        segmentsByKey: new Map(),
+      });
+    }
+
+    const floor = floorsByNumber.get(floorKey);
+    const segmentKey = normalizeStackingGroupKey(detail.label);
+    const existingSegment = floor.segmentsByKey.get(segmentKey);
+    const segment = existingSegment ?? {
+      key: segmentKey,
+      label: detail.label,
+      sortOrder: detail.sortOrder,
+      area: 0,
+      netArea: 0,
+      grossArea: 0,
+      color: colorForStackingLabel(detail.label),
+      sourceItemIds: [],
+    };
+
+    segment.area = roundArea(segment.area + activeArea);
+    segment.netArea = roundArea(segment.netArea + netArea);
+    segment.grossArea = roundArea(segment.grossArea + grossArea);
+    segment.sortOrder = Math.min(segment.sortOrder, detail.sortOrder);
+    if (item.id) segment.sourceItemIds.push(item.id);
+    floor.segmentsByKey.set(segmentKey, segment);
+  }
+
+  const floors = [...floorsByNumber.values()]
+    .map((floor) => {
+      const segments = [...floor.segmentsByKey.values()]
+        .sort((a, b) => a.sortOrder - b.sortOrder || a.label.localeCompare(b.label));
+      const totalArea = roundArea(segments.reduce((sum, segment) => sum + segment.area, 0));
+
+      return {
+        key: floor.key,
+        number: floor.number,
+        label: floor.label,
+        height: floorHeight,
+        totalArea,
+        segments: segments.map((segment) => ({
+          ...segment,
+          sourceItemIds: [...new Set(segment.sourceItemIds ?? [])],
+          width: totalArea > 0 ? roundArea((segment.area / totalArea) * defaultWidth) : 0,
+        })),
+      };
+    })
+    .filter((floor) => floor.totalArea > 0)
+    .sort((a, b) => a.number - b.number);
+
+  return {
+    projectName: getProgramTitle(programData),
+    levelOfDetail: normalizedSettings.levelOfDetail,
+    defaultWidth,
+    floorHeight,
+    slabHeight,
+    slabs: createStackingSlabsForFloors(floors, slabHeight),
+    textSize,
+    areaMode,
+    showGross: Boolean(normalizedSettings.grossSquareFootage),
+    showNet: Boolean(normalizedSettings.netSquareFootage),
+    floors,
+  };
+}
+
+function getStackingDiagramLayout(diagram, size, zoom = 1, viewOffset = { x: 0, y: 0 }) {
+  const canvasWidth = Math.max(1, size.width);
+  const canvasHeight = Math.max(1, size.height);
+  const offsetX = getFiniteNumber(viewOffset?.x) ?? 0;
+  const offsetY = getFiniteNumber(viewOffset?.y) ?? 0;
+  const emptyLayout = {
+    buildingHeight: 0,
+    buildingWidth: 0,
+    buildingX: 0,
+    buildingY: 0,
+    dimensionInputs: [],
+    horizontalDimensionY: 0,
+    layoutX: 0,
+    layoutY: 0,
+    scale: 1,
+    stackItems: [],
+    verticalDimensionX: 0,
+  };
+
+  if (!diagram?.floors?.length) return emptyLayout;
+
+  const modelWidth = Math.max(STACKING_MIN_DIMENSION_FEET, getFiniteNumber(diagram.defaultWidth) ?? 100);
+  const stackItems = getStackingStackItems(diagram);
+  const modelHeight = Math.max(
+    STACKING_MIN_DIMENSION_FEET,
+    stackItems.reduce((sum, item) => sum + item.value, 0),
+  );
+  const normalizedZoom = clamp(zoom, STACKING_MIN_ZOOM, STACKING_MAX_ZOOM);
+  const verticalDimensionOffset = clamp(modelWidth * 0.12, 8, 18);
+  const horizontalDimensionOffset = clamp(modelHeight * 0.08, 7, 16);
+  const padding = {
+    left: canvasWidth < 620 ? 96 : 126,
+    right: canvasWidth < 620 ? 74 : 116,
+    top: 34,
+    bottom: 88,
+  };
+  const availableWidth = Math.max(1, canvasWidth - padding.left - padding.right);
+  const availableHeight = Math.max(1, canvasHeight - padding.top - padding.bottom);
+  const modelLayoutWidth = modelWidth + verticalDimensionOffset;
+  const modelLayoutHeight = modelHeight + horizontalDimensionOffset;
+  const fitScale = Math.max(0.1, Math.min(availableWidth / modelLayoutWidth, availableHeight / modelLayoutHeight));
+  const scale = fitScale * normalizedZoom;
+  const layoutWidth = modelLayoutWidth * scale;
+  const layoutHeight = modelLayoutHeight * scale;
+  const layoutX = padding.left + Math.max(0, (availableWidth - layoutWidth) / 2) + offsetX;
+  const layoutY = padding.top + Math.max(0, (availableHeight - layoutHeight) / 2) + offsetY;
+  const buildingX = layoutX + verticalDimensionOffset * scale;
+  const buildingY = layoutY;
+  const buildingWidth = modelWidth * scale;
+  const buildingHeight = modelHeight * scale;
+  const verticalDimensionX = layoutX;
+  const horizontalDimensionY = buildingY + buildingHeight + horizontalDimensionOffset * scale;
+  let y = buildingY;
+
+  const layoutStackItems = stackItems.map((item) => {
+    const height = item.value * scale;
+    const layoutItem = {
+      ...item,
+      height,
+      modelHeight: item.value,
+      width: buildingWidth,
+      x: buildingX,
+      y,
+    };
+    y += height;
+    return layoutItem;
+  });
+
+  return {
+    buildingHeight,
+    buildingWidth,
+    buildingX,
+    buildingY,
+    dimensionInputs: [
+      ...layoutStackItems.map((item) => ({
+        ariaLabel: item.kind === "floor" ? `${item.floor.label} height` : `${item.label} height`,
+        floorKey: item.floor?.key,
+        kind: item.kind,
+        key: item.dimensionKey,
+        left: verticalDimensionX - (item.kind === "slab" ? 38 : 0),
+        orientation: "vertical",
+        slabIndex: item.slabIndex,
+        top: item.y + item.height / 2,
+        value: item.value,
+      })),
+      {
+        ariaLabel: "Overall stacking diagram width",
+        kind: "width",
+        key: "width",
+        left: buildingX + buildingWidth / 2,
+        orientation: "horizontal",
+        top: horizontalDimensionY,
+        value: modelWidth,
+      },
+    ],
+    horizontalDimensionY,
+    layoutX,
+    layoutY,
+    scale,
+    stackItems: layoutStackItems,
+    verticalDimensionX,
+  };
+}
+
+function getStackingZoomedViewOffset(diagram, size, currentZoom, nextZoom, currentOffset, anchorPoint) {
+  const currentLayout = getStackingDiagramLayout(diagram, size, currentZoom, { x: 0, y: 0 });
+  const nextLayout = getStackingDiagramLayout(diagram, size, nextZoom, { x: 0, y: 0 });
+
+  if (!currentLayout.scale || !nextLayout.scale) return currentOffset;
+
+  const modelX = (anchorPoint.x - currentLayout.layoutX - currentOffset.x) / currentLayout.scale;
+  const modelY = (anchorPoint.y - currentLayout.layoutY - currentOffset.y) / currentLayout.scale;
+
+  return {
+    x: anchorPoint.x - nextLayout.layoutX - modelX * nextLayout.scale,
+    y: anchorPoint.y - nextLayout.layoutY - modelY * nextLayout.scale,
+  };
+}
+
+function getStackingStackItems(diagram) {
+  const orderedFloors = getOrderedStackingFloors(diagram);
+  const slabs = getStackingSlabs(diagram);
+  const stackItems = [];
+
+  for (const [floorIndex, floor] of orderedFloors.entries()) {
+    stackItems.push({
+      dimensionKey: `floor:${floor.key}`,
+      floor,
+      kind: "floor",
+      label: floor.label,
+      value: getStackingFloorHeight(diagram, floor),
+    });
+
+    if (floorIndex < orderedFloors.length - 1) {
+      const slab = slabs[floorIndex];
+      stackItems.push({
+        dimensionKey: `slab:${floorIndex}`,
+        kind: "slab",
+        label: slab.label,
+        slabIndex: floorIndex,
+        value: getStackingSlabHeight(diagram, floorIndex),
+      });
+    }
+  }
+
+  return stackItems;
+}
+
+function getOrderedStackingFloors(diagram) {
+  return [...(diagram?.floors ?? [])].sort((a, b) => b.number - a.number);
+}
+
+function getStackingFloorHeight(diagram, floor) {
+  return getPositiveStackingDimension(floor?.height, diagram?.floorHeight, 12);
+}
+
+function getStackingSlabHeight(diagram, slabIndex) {
+  const slab = Array.isArray(diagram?.slabs) ? diagram.slabs[slabIndex] : null;
+  return getPositiveStackingDimension(slab?.height, diagram?.slabHeight, 1);
+}
+
+function getPositiveStackingDimension(...values) {
+  for (const value of values) {
+    const parsedValue = getFiniteNumber(value);
+    if (parsedValue != null && parsedValue > 0) return Math.max(STACKING_MIN_DIMENSION_FEET, parsedValue);
+  }
+
+  return STACKING_MIN_DIMENSION_FEET;
+}
+
+function createStackingSlabsForFloors(floors, slabHeight) {
+  const orderedFloors = [...(floors ?? [])].sort((a, b) => b.number - a.number);
+  return orderedFloors.slice(0, -1).map((floor, index) => {
+    const lowerFloor = orderedFloors[index + 1];
+    return {
+      height: slabHeight,
+      key: `slab:${floor.key}:${lowerFloor.key}`,
+      label: "Slab",
+    };
+  });
+}
+
+function getStackingSlabs(diagram) {
+  const slabCount = Math.max(0, (diagram?.floors?.length ?? 0) - 1);
+  const existingSlabs = Array.isArray(diagram?.slabs) ? diagram.slabs : [];
+  const defaultSlabHeight = getPositiveStackingDimension(diagram?.slabHeight, 1);
+
+  return Array.from({ length: slabCount }, (_, index) => ({
+    height: getPositiveStackingDimension(existingSlabs[index]?.height, defaultSlabHeight),
+    key: existingSlabs[index]?.key ?? `slab:${index}`,
+    label: existingSlabs[index]?.label ?? "Slab",
+  }));
+}
+
+function updateStackingDiagramDimension(diagram, dimension, value) {
+  const nextValue = roundArea(Math.max(STACKING_MIN_DIMENSION_FEET, value));
+
+  if (dimension.kind === "width") {
+    return updateStackingDiagramWidth(diagram, nextValue);
+  }
+
+  if (dimension.kind === "floor") {
+    return {
+      ...diagram,
+      floors: diagram.floors.map((floor) =>
+        floor.key === dimension.floorKey
+          ? {
+              ...floor,
+              height: nextValue,
+            }
+          : floor,
+      ),
+    };
+  }
+
+  if (dimension.kind === "slab") {
+    const slabs = getStackingSlabs(diagram).map((slab, index) =>
+      index === dimension.slabIndex
+        ? {
+            ...slab,
+            height: nextValue,
+          }
+        : slab,
+    );
+
+    return {
+      ...diagram,
+      slabs,
+    };
+  }
+
+  return diagram;
+}
+
+function updateStackingDiagramWidth(diagram, width) {
+  return {
+    ...diagram,
+    defaultWidth: width,
+    floors: diagram.floors.map((floor) => ({
+      ...floor,
+      segments: floor.segments.map((segment) => ({
+        ...segment,
+        width: floor.totalArea > 0 ? roundArea((segment.area / floor.totalArea) * width) : 0,
+      })),
+    })),
+  };
+}
+
+function parseDimensionInputValue(value) {
+  const normalizedValue = String(value ?? "")
+    .replace(/,/g, "")
+    .replace(/[’′]/g, "'")
+    .replace(/[“”″]/g, "\"")
+    .trim()
+    .toLowerCase();
+
+  if (!normalizedValue) return null;
+
+  const formattedImperialMatch = normalizedValue.match(/^(\d+(?:\.\d+)?)\s*(?:'|ft|feet)\s*-\s*(\d+(?:\.\d+)?)\s*(?:"|in|inch|inches)?$/);
+  if (formattedImperialMatch) {
+    const feet = Number(formattedImperialMatch[1]);
+    const inches = Number(formattedImperialMatch[2]);
+    const parsedValue = feet + inches / 12;
+    return Number.isFinite(parsedValue) && parsedValue > 0 ? parsedValue : null;
+  }
+
+  const imperialMatch = normalizedValue.match(/^(\d+(?:\.\d+)?)\s*(?:'|ft|feet)\s*(?:(\d+(?:\.\d+)?)\s*(?:"|in|inch|inches)?)?$/);
+  if (imperialMatch) {
+    const feet = Number(imperialMatch[1]);
+    const inches = Number(imperialMatch[2] ?? 0);
+    const parsedValue = feet + inches / 12;
+    return Number.isFinite(parsedValue) && parsedValue > 0 ? parsedValue : null;
+  }
+
+  const dashMatch = normalizedValue.match(/^(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*(?:"|in|inch|inches)?$/);
+  if (dashMatch) {
+    const feet = Number(dashMatch[1]);
+    const inches = Number(dashMatch[2]);
+    const parsedValue = feet + inches / 12;
+    return Number.isFinite(parsedValue) && parsedValue > 0 ? parsedValue : null;
+  }
+
+  const inchesMatch = normalizedValue.match(/^(\d+(?:\.\d+)?)\s*(?:"|in|inch|inches)$/);
+  if (inchesMatch) {
+    const parsedValue = Number(inchesMatch[1]) / 12;
+    return Number.isFinite(parsedValue) && parsedValue > 0 ? parsedValue : null;
+  }
+
+  const parsedValue = Number(normalizedValue);
+  return Number.isFinite(parsedValue) && parsedValue > 0 ? parsedValue : null;
+}
+
+function formatDimensionInputValue(value) {
+  const totalInches = Math.max(0, Math.round((getFiniteNumber(value) ?? 0) * 12));
+  const feet = Math.floor(totalInches / 12);
+  const inches = totalInches % 12;
+  return `${feet}'-${inches}"`;
+}
+
+function getDimensionEditorWidth(value) {
+  const characterCount = clamp(String(value ?? "").length || 1, 4, 24);
+  return `calc(${characterCount}ch + 14px)`;
+}
+
+function drawStackingDiagram(canvas, diagram, size, layout, options = {}) {
+  if (!canvas) return;
+
+  const width = Math.max(1, size.width);
+  const height = Math.max(1, size.height);
+  const pixelRatio = Math.max(1, typeof window === "undefined" ? 1 : window.devicePixelRatio || 1);
+  const scaledWidth = Math.round(width * pixelRatio);
+  const scaledHeight = Math.round(height * pixelRatio);
+
+  if (canvas.width !== scaledWidth) canvas.width = scaledWidth;
+  if (canvas.height !== scaledHeight) canvas.height = scaledHeight;
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  if (!diagram?.floors?.length || !layout?.stackItems?.length) return;
+
+  const labelFontSize = clamp(diagram.textSize, 7, 30);
+  const dragPreview = options.dragPreview ?? null;
+  const dragHighlightRects = [];
+
+  ctx.lineJoin = "miter";
+
+  for (const item of layout.stackItems) {
+    if (item.kind === "slab") {
+      drawStackingSlab(ctx, item.x, item.y, item.width, item.height);
+      continue;
+    }
+
+    const floor = item.floor;
+    const totalArea = getStackingFloorTotalArea(floor);
+    let x = item.x;
+
+    for (const [segmentIndex, segment] of floor.segments.entries()) {
+      const remainingWidth = item.x + item.width - x;
+      const segmentWidth = segmentIndex === floor.segments.length - 1
+        ? remainingWidth
+        : item.width * (getStackingSegmentArea(segment) / totalArea);
+      const isDragPreviewSegment = isStackingDragPreviewSegment(dragPreview, floor.key, segmentIndex);
+
+      if (dragPreview && !isDragPreviewSegment) {
+        ctx.save();
+        ctx.globalAlpha = 0.64;
+        drawStackingSegment(ctx, segment, x, item.y, segmentWidth, item.height, diagram, labelFontSize);
+        ctx.restore();
+      } else {
+        drawStackingSegment(ctx, segment, x, item.y, segmentWidth, item.height, diagram, labelFontSize);
+      }
+
+      if (isDragPreviewSegment) {
+        dragHighlightRects.push({ height: item.height, width: segmentWidth, x, y: item.y });
+      }
+      x += segmentWidth;
+    }
+
+    ctx.strokeStyle = "#0a0a0a";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(item.x, item.y, item.width, item.height);
+    drawStackingFloorLabel(ctx, floor, item.x + item.width + 10, item.y + item.height / 2, diagram);
+  }
+
+  drawStackingDimensions(ctx, layout);
+  drawStackingDragPreview(ctx, dragPreview, dragHighlightRects, diagram, labelFontSize);
+}
+
+function isStackingDragPreviewSegment(dragPreview, floorKey, segmentIndex) {
+  return Boolean(
+    dragPreview?.targetFloorKey === floorKey &&
+    dragPreview.targetSegmentIndex === segmentIndex,
+  );
+}
+
+function drawStackingDragPreview(ctx, dragPreview, highlightRects, diagram, labelFontSize) {
+  if (!dragPreview) return;
+
+  if (dragPreview.targetFloorKey != null) {
+    for (const rect of highlightRects) {
+      drawStackingDragOutline(ctx, rect.x, rect.y, rect.width, rect.height);
+    }
+    return;
+  }
+
+  const width = Math.max(24, dragPreview.draggedRect?.width ?? 72);
+  const height = Math.max(18, dragPreview.draggedRect?.height ?? 36);
+  const x = dragPreview.draggedCenter.x - width / 2;
+  const y = dragPreview.draggedCenter.y - height / 2;
+
+  ctx.save();
+  ctx.globalAlpha = 0.76;
+  drawStackingSegment(ctx, dragPreview.draggedSegment, x, y, width, height, diagram, labelFontSize);
+  ctx.restore();
+  drawStackingDragOutline(ctx, x, y, width, height);
+}
+
+function drawStackingDragOutline(ctx, x, y, width, height) {
+  if (width <= 0 || height <= 0) return;
+
+  ctx.save();
+  ctx.strokeStyle = "#1a5cff";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
+  ctx.strokeRect(x + 1, y + 1, Math.max(0, width - 2), Math.max(0, height - 2));
+  ctx.restore();
+}
+
+function drawStackingSegment(ctx, segment, x, y, width, height, diagram, fontSize) {
+  if (width <= 0 || height <= 0) return;
+
+  ctx.fillStyle = getStackingSegmentColor(segment);
+  ctx.fillRect(x, y, width, height);
+  ctx.strokeStyle = "#0a0a0a";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x, y, width, height);
+
+  if (width < 28 || height < 18) return;
+
+  const padding = clamp(Math.min(width, height) * 0.08, 4, 8);
+  const textWidth = Math.max(1, width - padding * 2);
+  const textHeight = Math.max(1, height - padding * 2);
+  const lineHeight = fontSize * 1.14;
+  const maxLines = Math.max(1, Math.floor(textHeight / lineHeight));
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x + padding, y + padding, textWidth, textHeight);
+  ctx.clip();
+
+  ctx.fillStyle = "#0a0a0a";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.font = `700 ${fontSize}px Arial, sans-serif`;
+
+  const labelLines = wrapCanvasText(ctx, segment.label, textWidth, maxLines);
+  const areaLabels = getStackingSegmentAreaLabels(segment, diagram);
+  const areaFontSize = clamp(fontSize * 0.82, 7, 24);
+  const usedLabelLines = areaLabels.length > 0 && labelLines.length >= maxLines ? labelLines.slice(0, Math.max(1, maxLines - 1)) : labelLines;
+  let textY = y + padding;
+
+  for (const line of usedLabelLines.slice(0, maxLines)) {
+    ctx.fillText(line, x + padding, textY);
+    textY += lineHeight;
+  }
+
+  const remainingLines = maxLines - usedLabelLines.length;
+  if (remainingLines > 0 && areaLabels.length > 0) {
+    ctx.font = `400 ${areaFontSize}px Arial, sans-serif`;
+    for (const line of areaLabels.slice(0, remainingLines)) {
+      ctx.fillText(truncateCanvasText(ctx, line, textWidth), x + padding, textY);
+      textY += lineHeight;
+    }
+  }
+
+  ctx.restore();
+}
+
+function drawStackingSlab(ctx, x, y, width, height) {
+  if (width <= 0 || height <= 0) return;
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(x, y, width, height);
+  ctx.strokeStyle = "#0a0a0a";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x, y, width, height);
+}
+
+function drawStackingFloorLabel(ctx, floor, x, y, diagram) {
+  ctx.fillStyle = "#0a0a0a";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.font = "700 11px Arial, sans-serif";
+  ctx.fillText(floor.label, x, y - 7);
+  ctx.font = "400 10px Arial, sans-serif";
+  ctx.fillText(`${formatDiagramArea(floor.totalArea)} ${diagram.areaMode === "gross" ? "DGSF" : "NSF"}`, x, y + 7);
+}
+
+function drawStackingDimensions(ctx, layout) {
+  const {
+    buildingX,
+    buildingY,
+    buildingWidth,
+    buildingHeight,
+    dimensionInputs,
+    horizontalDimensionY,
+    stackItems,
+    verticalDimensionX,
+  } = layout;
+
+  const boundaryYs = [buildingY];
+  for (const item of stackItems) boundaryYs.push(item.y + item.height);
+
+  ctx.save();
+  ctx.strokeStyle = "#0a0a0a";
+  ctx.lineWidth = 1;
+
+  const verticalDimensionDistance = Math.max(1, buildingX - verticalDimensionX);
+  const horizontalDimensionDistance = Math.max(1, horizontalDimensionY - (buildingY + buildingHeight));
+  const verticalGap = Math.min(STACKING_DIMENSION_EXTENSION_GAP, verticalDimensionDistance * 0.45);
+  const horizontalGap = Math.min(STACKING_DIMENSION_EXTENSION_GAP, horizontalDimensionDistance * 0.45);
+  const dimensionLineGaps = getStackingDimensionLineGaps(ctx, {
+    dimensionInputs,
+    horizontalDimensionY,
+    verticalDimensionX,
+  });
+
+  for (const y of boundaryYs) {
+    drawCanvasLine(ctx, verticalDimensionX - STACKING_DIMENSION_EXTENSION_OVERHANG, y, buildingX - verticalGap, y);
+    drawDimensionTick(ctx, verticalDimensionX, y);
+  }
+
+  drawCanvasLineWithGaps(
+    ctx,
+    verticalDimensionX,
+    buildingY - STACKING_DIMENSION_EXTENSION_OVERHANG,
+    verticalDimensionX,
+    buildingY + buildingHeight + STACKING_DIMENSION_EXTENSION_OVERHANG,
+    dimensionLineGaps.vertical,
+  );
+  drawCanvasLine(
+    ctx,
+    buildingX,
+    buildingY + buildingHeight + horizontalGap,
+    buildingX,
+    horizontalDimensionY + STACKING_DIMENSION_EXTENSION_OVERHANG,
+  );
+  drawCanvasLine(
+    ctx,
+    buildingX + buildingWidth,
+    buildingY + buildingHeight + horizontalGap,
+    buildingX + buildingWidth,
+    horizontalDimensionY + STACKING_DIMENSION_EXTENSION_OVERHANG,
+  );
+  drawCanvasLineWithGaps(
+    ctx,
+    buildingX - STACKING_DIMENSION_EXTENSION_OVERHANG,
+    horizontalDimensionY,
+    buildingX + buildingWidth + STACKING_DIMENSION_EXTENSION_OVERHANG,
+    horizontalDimensionY,
+    dimensionLineGaps.horizontal,
+  );
+  drawDimensionTick(ctx, buildingX, horizontalDimensionY);
+  drawDimensionTick(ctx, buildingX + buildingWidth, horizontalDimensionY);
+
+  ctx.restore();
+}
+
+function getStackingDimensionLineGaps(ctx, layout) {
+  const vertical = [];
+  const horizontal = [];
+  const dimensionInputs = layout.dimensionInputs ?? [];
+
+  ctx.save();
+  ctx.font = STACKING_DIMENSION_LABEL_FONT;
+
+  for (const dimension of dimensionInputs) {
+    const labelWidth = Math.min(
+      STACKING_DIMENSION_LABEL_WIDTH,
+      Math.max(1, ctx.measureText(formatDimensionInputValue(dimension.value)).width + STACKING_DIMENSION_LABEL_TEXT_PADDING * 2),
+    );
+    const labelLeft = dimension.left - labelWidth / 2;
+    const labelRight = dimension.left + labelWidth / 2;
+    const labelTop = dimension.top - STACKING_DIMENSION_LABEL_HEIGHT / 2;
+    const labelBottom = dimension.top + STACKING_DIMENSION_LABEL_HEIGHT / 2;
+
+    if (
+      dimension.orientation === "vertical" &&
+      layout.verticalDimensionX >= labelLeft - STACKING_DIMENSION_LABEL_LINE_GAP &&
+      layout.verticalDimensionX <= labelRight + STACKING_DIMENSION_LABEL_LINE_GAP
+    ) {
+      vertical.push([
+        labelTop - STACKING_DIMENSION_LABEL_LINE_GAP,
+        labelBottom + STACKING_DIMENSION_LABEL_LINE_GAP,
+      ]);
+    }
+
+    if (
+      dimension.orientation === "horizontal" &&
+      layout.horizontalDimensionY >= labelTop - STACKING_DIMENSION_LABEL_LINE_GAP &&
+      layout.horizontalDimensionY <= labelBottom + STACKING_DIMENSION_LABEL_LINE_GAP
+    ) {
+      horizontal.push([
+        labelLeft - STACKING_DIMENSION_LABEL_LINE_GAP,
+        labelRight + STACKING_DIMENSION_LABEL_LINE_GAP,
+      ]);
+    }
+  }
+
+  ctx.restore();
+  return { horizontal, vertical };
+}
+
+function drawCanvasLine(ctx, x1, y1, x2, y2) {
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+}
+
+function drawCanvasLineWithGaps(ctx, x1, y1, x2, y2, gaps = []) {
+  const isVertical = Math.abs(x1 - x2) < 0.01;
+  const isHorizontal = Math.abs(y1 - y2) < 0.01;
+
+  if ((!isVertical && !isHorizontal) || gaps.length === 0) {
+    drawCanvasLine(ctx, x1, y1, x2, y2);
+    return;
+  }
+
+  const lineStart = isVertical ? y1 : x1;
+  const lineEnd = isVertical ? y2 : x2;
+  const lineMin = Math.min(lineStart, lineEnd);
+  const lineMax = Math.max(lineStart, lineEnd);
+  const normalizedGaps = normalizeDimensionLineGaps(gaps, lineMin, lineMax);
+
+  if (normalizedGaps.length === 0) {
+    drawCanvasLine(ctx, x1, y1, x2, y2);
+    return;
+  }
+
+  let cursor = lineMin;
+  for (const [gapStart, gapEnd] of normalizedGaps) {
+    if (gapStart - cursor > 0.5) {
+      drawCanvasLine(
+        ctx,
+        isVertical ? x1 : cursor,
+        isVertical ? cursor : y1,
+        isVertical ? x2 : gapStart,
+        isVertical ? gapStart : y2,
+      );
+    }
+    cursor = Math.max(cursor, gapEnd);
+  }
+
+  if (lineMax - cursor > 0.5) {
+    drawCanvasLine(
+      ctx,
+      isVertical ? x1 : cursor,
+      isVertical ? cursor : y1,
+      isVertical ? x2 : lineMax,
+      isVertical ? lineMax : y2,
+    );
+  }
+}
+
+function normalizeDimensionLineGaps(gaps, lineMin, lineMax) {
+  const normalizedGaps = gaps
+    .map(([start, end]) => [
+      clamp(Math.min(start, end), lineMin, lineMax),
+      clamp(Math.max(start, end), lineMin, lineMax),
+    ])
+    .filter(([start, end]) => end - start > 0.5)
+    .sort((a, b) => a[0] - b[0]);
+
+  const mergedGaps = [];
+  for (const gap of normalizedGaps) {
+    const previousGap = mergedGaps[mergedGaps.length - 1];
+    if (!previousGap || gap[0] > previousGap[1]) {
+      mergedGaps.push(gap);
+      continue;
+    }
+    previousGap[1] = Math.max(previousGap[1], gap[1]);
+  }
+
+  return mergedGaps;
+}
+
+function drawDimensionTick(ctx, x, y) {
+  const tickSize = 5;
+  ctx.beginPath();
+  ctx.moveTo(x - tickSize, y + tickSize);
+  ctx.lineTo(x + tickSize, y - tickSize);
+  ctx.stroke();
+}
+
+function getStackingSegmentAreaLabels(segment, diagram) {
+  const labels = [];
+  if (diagram.showNet) labels.push(`${formatDiagramArea(segment.netArea)} NSF`);
+  if (diagram.showGross) labels.push(`${formatDiagramArea(segment.grossArea)} DGSF`);
+  return labels;
+}
+
+function wrapCanvasText(ctx, text, maxWidth, maxLines) {
+  const words = String(text ?? "").trim().split(/\s+/).filter(Boolean);
+  const lines = [];
+  let currentLine = "";
+
+  for (let wordIndex = 0; wordIndex < words.length; wordIndex += 1) {
+    const word = words[wordIndex];
+    const nextLine = currentLine ? `${currentLine} ${word}` : word;
+    if (ctx.measureText(nextLine).width <= maxWidth) {
+      currentLine = nextLine;
+      continue;
+    }
+
+    if (currentLine) lines.push(currentLine);
+    currentLine = word;
+
+    if (lines.length === maxLines) {
+      const overflowText = [currentLine, ...words.slice(wordIndex + 1)].join(" ");
+      lines[lines.length - 1] = truncateCanvasText(ctx, `${lines[lines.length - 1]} ${overflowText}`, maxWidth);
+      return lines;
+    }
+  }
+
+  if (currentLine) lines.push(currentLine);
+
+  if (lines.length > maxLines) {
+    const visibleLines = lines.slice(0, maxLines);
+    visibleLines[visibleLines.length - 1] = truncateCanvasText(ctx, lines.slice(maxLines - 1).join(" "), maxWidth);
+    return visibleLines;
+  }
+
+  return lines.length > 0 ? lines : [""];
+}
+
+function truncateCanvasText(ctx, text, maxWidth) {
+  const value = String(text ?? "");
+  if (ctx.measureText(value).width <= maxWidth) return value;
+
+  let truncated = value;
+  while (truncated.length > 1 && ctx.measureText(`${truncated}...`).width > maxWidth) {
+    truncated = truncated.slice(0, -1);
+  }
+
+  return `${truncated}...`;
+}
+
+function parsePositiveDiagramNumber(value, fallbackValue) {
+  const parsed = parseEditableNumber(value);
+  return parsed > 0 ? parsed : fallbackValue;
+}
+
+function getStackingFloorNumber(item, floor, floorId = item?.floor_id) {
+  const floorNumber = getFiniteNumber(floor?.number);
+  if (floorNumber != null) return floorNumber;
+  return floorNumberFromId(floorId) ?? floorNumberFromLabel(item.extensions?.original_floor_label) ?? floorNumberFromId(item.floor_id) ?? 1;
+}
+
+function getProgramItemDiagramValues(item) {
+  const values = item?.extensions?.[DIAGRAM_VALUES_EXTENSION_KEY];
+  return isPlainObject(values) ? values : {};
+}
+
+function getProgramItemExplicitDiagramFloorId(item) {
+  const floorId = getProgramItemDiagramValues(item).floor_id;
+  return floorId === undefined || floorId === null || floorId === "" ? null : String(floorId);
+}
+
+function getProgramItemDiagramFloorId(item) {
+  return getProgramItemExplicitDiagramFloorId(item) ?? String(item?.floor_id ?? "");
+}
+
+function getStackingDetailForItem(item, group, department, levelOfDetail) {
+  const detailSortOrder =
+    getFiniteNumber(department?.sort_order) ??
+    getFiniteNumber(group?.sort_order) ??
+    getFiniteNumber(item.sort_order) ??
+    0;
+
+  switch (levelOfDetail) {
+    case "department":
+      return {
+        label: firstStackingLabel(
+          readStackingProperty(department, ["name", "department_name", "departmentName"]),
+          readStackingProperty(item, ["department_name", "departmentName"]),
+          "Unknown Department",
+        ),
+        sortOrder: getFiniteNumber(department?.sort_order) ?? detailSortOrder,
+      };
+    case "departmentFunction":
+      return {
+        label: firstStackingLabel(
+          readStackingProperty(item, ["department_function", "departmentFunction", "department_function_name", "departmentFunctionName"]),
+          readStackingProperty(group, ["department_function", "departmentFunction", "department_function_name", "departmentFunctionName"]),
+          readStackingProperty(department, ["department_function", "departmentFunction", "department_function_name", "departmentFunctionName"]),
+          group?.name,
+          item.program_type,
+          "Unknown Department Function",
+        ),
+        sortOrder: getFiniteNumber(group?.sort_order) ?? detailSortOrder,
+      };
+    case "functionalArea":
+      return {
+        label: firstStackingLabel(
+          readStackingProperty(item, ["functional_area", "functionalArea", "functional_area_name", "functionalAreaName"]),
+          readStackingProperty(group, ["functional_area", "functionalArea", "functional_area_name", "functionalAreaName"]),
+          group?.name,
+          item.program_type,
+          item.name,
+          "Unknown Functional Area",
+        ),
+        sortOrder: getFiniteNumber(group?.sort_order) ?? detailSortOrder,
+      };
+    case "room":
+      return {
+        label: firstStackingLabel(item.name, item.source_ref?.original_label, "Unknown Room"),
+        sortOrder: getFiniteNumber(item.sort_order) ?? detailSortOrder,
+      };
+    case "functionalGroup":
+    default:
+      return {
+        label: firstStackingLabel(
+          readStackingProperty(item, ["functional_group", "functionalGroup", "functional_group_name", "functionalGroupName"]),
+          readStackingProperty(group, ["functional_group", "functionalGroup", "functional_group_name", "functionalGroupName"]),
+          readStackingProperty(department, ["functional_group", "functionalGroup", "functional_group_name", "functionalGroupName"]),
+          group?.name,
+          item.program_type,
+          "Unknown Functional Group",
+        ),
+        sortOrder: getFiniteNumber(group?.sort_order) ?? detailSortOrder,
+      };
+  }
+}
+
+function getProgramItemNetArea(item) {
+  const storedTotal = firstFiniteNumber(
+    item.net_nsf,
+    item.total_nsf,
+    item.extensions?.computed_total_nsf,
+    item.extensions?.spreadsheet_total_nsf,
+  );
+  if (storedTotal != null) return roundArea(storedTotal);
+
+  const quantity = getFiniteNumber(item.quantity) ?? 0;
+  const nsfPerUnit = getFiniteNumber(item.nsf_per_unit) ?? 0;
+  return roundArea(quantity * nsfPerUnit);
+}
+
+function getProgramItemGrossArea(item, department, netArea) {
+  const storedGross = firstFiniteNumber(
+    item.gross_dgsf,
+    item.gross_nsf,
+    item.extensions?.computed_gross_dgsf,
+    item.extensions?.spreadsheet_gross_dgsf,
+  );
+  if (storedGross != null) return roundArea(storedGross);
+
+  const grossingFactor = firstFiniteNumber(item.grossing_factor, department?.grossing_factor) ?? 1;
+  return roundArea(netArea * Math.max(0, grossingFactor));
+}
+
+function readStackingProperty(source, keys) {
+  if (!source || typeof source !== "object") return undefined;
+
+  for (const key of keys) {
+    if (source[key] !== undefined && source[key] !== null && source[key] !== "") return source[key];
+    if (source.extensions?.[key] !== undefined && source.extensions[key] !== null && source.extensions[key] !== "") {
+      return source.extensions[key];
+    }
+  }
+
+  return undefined;
+}
+
+function firstStackingLabel(...values) {
+  for (const value of values) {
+    const label = humanizeStackingLabel(value);
+    if (label) return label;
+  }
+
+  return "Unlabeled";
+}
+
+function humanizeStackingLabel(value) {
+  if (value === undefined || value === null) return "";
+  const label = String(value).trim().replace(/\s+/g, " ");
+  if (!label) return "";
+
+  if (/^[a-z0-9_]+$/.test(label) && label.includes("_")) {
+    return label
+      .split("_")
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ");
+  }
+
+  return label;
+}
+
+function normalizeStackingGroupKey(label) {
+  return humanizeStackingLabel(label).toLowerCase();
+}
+
+function floorNumberFromLabel(value) {
+  const match = String(value ?? "").match(/-?\d+(\.\d+)?/);
+  if (!match) return undefined;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    const parsed = getFiniteNumber(value);
+    if (parsed != null) return parsed;
+  }
+
+  return undefined;
+}
+
+function getFiniteNumber(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(String(value).replace(/,/g, "").trim());
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function colorForStackingLabel(label) {
+  const normalizedLabel = normalizeStackingGroupKey(label);
+  let hash = 0;
+  for (let index = 0; index < normalizedLabel.length; index += 1) {
+    hash = (hash * 31 + normalizedLabel.charCodeAt(index)) | 0;
+  }
+
+  return STACKING_COLOR_PALETTE[Math.abs(hash) % STACKING_COLOR_PALETTE.length];
+}
+
+function getStackingSegmentColor(segment) {
+  return colorForStackingLabel(segment?.label ?? segment?.key ?? "");
+}
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 async function parseJsonResponse(response, label) {
@@ -2772,8 +7782,258 @@ function getSortIconClass(columnKey, sortConfig) {
   return sortConfig.direction === "asc" ? "is-asc" : "is-desc";
 }
 
+function getSpreadsheetColumnLabel(index) {
+  let value = index + 1;
+  let label = "";
+
+  while (value > 0) {
+    value -= 1;
+    label = String.fromCharCode(65 + (value % 26)) + label;
+    value = Math.floor(value / 26);
+  }
+
+  return label;
+}
+
+function getTableColumnsForDocument(tableDocument, spreadsheetSettings = createDefaultSpreadsheetSettings()) {
+  if (tableDocument?.draftRows?.length === 0) return blankSpreadsheetColumns;
+
+  const importedColumns = normalizeTableDisplayColumns(tableDocument?.programData?.extensions?.table_display?.columns);
+  const orderedImportedColumns = createOrderedTableColumns(importedColumns);
+  if (orderedImportedColumns.length > 0) return applySpreadsheetColumnSettings(orderedImportedColumns, spreadsheetSettings);
+
+  if (isImportedProgramData(tableDocument?.programData)) {
+    return applySpreadsheetColumnSettings(
+      createOrderedTableColumns(IMPORTED_SPREADSHEET_COLUMN_KEYS.map((key) => ({ key }))),
+      spreadsheetSettings,
+    );
+  }
+
+  return applySpreadsheetColumnSettings(columns, spreadsheetSettings);
+}
+
+function getHierarchicalSpreadsheetColumns(spreadsheetSettings = createDefaultSpreadsheetSettings()) {
+  return applySpreadsheetColumnSettings(HIERARCHICAL_SPREADSHEET_COLUMNS, spreadsheetSettings);
+}
+
+function applySpreadsheetColumnSettings(tableColumns, spreadsheetSettings = createDefaultSpreadsheetSettings()) {
+  if (!spreadsheetSettings?.distributeIdenticalRooms) return tableColumns;
+  return tableColumns.filter((column) => column.key !== "quantity");
+}
+
+function createOrderedTableColumns(sourceColumns) {
+  const baseColumnsByKey = new Map(columns.map((column) => [column.key, column]));
+  const sourceColumnsByKey = new Map(sourceColumns.map((column) => [column.key, column]));
+  const usedKeys = new Set();
+  const orderedColumns = [];
+  const prioritizedSourceColumns = [
+    ...PRIMARY_SPREADSHEET_COLUMN_KEYS.map((key) => sourceColumnsByKey.get(key) ?? { key }),
+    ...sourceColumns.filter((column) => !PRIMARY_SPREADSHEET_COLUMN_KEYS.includes(column.key)),
+  ];
+
+  for (const sourceColumn of prioritizedSourceColumns) {
+    const baseColumn = baseColumnsByKey.get(sourceColumn.key);
+    if (!baseColumn || usedKeys.has(sourceColumn.key)) continue;
+
+    usedKeys.add(sourceColumn.key);
+    orderedColumns.push({
+      ...baseColumn,
+      ...(sourceColumn.label ? { displayLabel: sourceColumn.label } : {}),
+    });
+  }
+
+  if (orderedColumns.length === 0) return [];
+
+  return [
+    ...orderedColumns,
+    ...columns.filter((column) => !usedKeys.has(column.key)),
+  ];
+}
+
+function normalizeTableDisplayColumns(value) {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((column) => {
+      const key = String(column?.key ?? "");
+      return {
+        key,
+        label: normalizeTableDisplayLabel(key, column?.label),
+      };
+    })
+    .filter((column) => column.key && column.label);
+}
+
+function normalizeTableDisplayLabel(columnKey, label) {
+  const normalizedLabel = normalizeProjectName(label);
+  if (columnKey === "programGroup" && normalizedLabel.toLowerCase() === "program group") {
+    return "Functional Area";
+  }
+  return normalizedLabel;
+}
+
+function isImportedProgramData(programData) {
+  return Boolean(programData?.project?.source_files?.length || programData?.extensions?.parser);
+}
+
+function getProgramDataSourceSignature(programData) {
+  if (!isPlainObject(programData)) return "";
+
+  const sourceFile = Array.isArray(programData.project?.source_files) ? programData.project.source_files[0] : null;
+  if (sourceFile?.checksum) return `checksum:${sourceFile.checksum}`;
+  if (sourceFile?.id || sourceFile?.name) {
+    return `source:${sourceFile.id ?? ""}:${sourceFile.name ?? ""}`;
+  }
+
+  const itemIds = (programData.program_items ?? [])
+    .map((item) => String(item?.id ?? ""))
+    .filter(Boolean)
+    .sort();
+  if (programData.project?.id && itemIds.length > 0) {
+    return `project-items:${programData.project.id}:${itemIds.join("|")}`;
+  }
+
+  return "";
+}
+
+function doProgramDataSourcesMatch(leftProgramData, rightProgramData) {
+  const leftSignature = getProgramDataSourceSignature(leftProgramData);
+  const rightSignature = getProgramDataSourceSignature(rightProgramData);
+  return Boolean(leftSignature && rightSignature && leftSignature === rightSignature);
+}
+
+function hasMatchingSavedProgramDataOption(optionsById, option, label) {
+  const rowCount = Number(option.rowCount);
+  const normalizedLabel = normalizeProjectName(label);
+
+  return [...optionsById.values()].some((existingOption) => (
+    existingOption.source === "output" &&
+    Number(existingOption.rowCount) === rowCount &&
+    normalizeProjectName(existingOption.label) === normalizedLabel
+  ));
+}
+
+function getTableColumnDisplayLabel(column) {
+  return column.displayLabel || column.label;
+}
+
+function getTableColumnHeaderLabel(column, columnIndex, isBlankSpreadsheet) {
+  const spreadsheetLabel = `(${getSpreadsheetColumnLabel(columnIndex)})`;
+  return isBlankSpreadsheet ? spreadsheetLabel : `${spreadsheetLabel} ${getTableColumnDisplayLabel(column)}`;
+}
+
+function createBlankSpreadsheetRows() {
+  return Array.from({ length: BLANK_SPREADSHEET_ROW_COUNT }, (_, index) => {
+    const row = { id: `blank-row-${index + 1}` };
+    for (const column of blankSpreadsheetColumns) row[column.key] = "";
+    return row;
+  });
+}
+
 function getCellKey(rowId, columnKey) {
   return `${rowId}::${columnKey}`;
+}
+
+function getDocumentCellKey(documentId, rowId, columnKey) {
+  return `${documentId || DEFAULT_TABLE_DOCUMENT_ID}::::${getCellKey(rowId, columnKey)}`;
+}
+
+function parseCellKey(cellKey) {
+  const value = String(cellKey ?? "");
+  const separatorIndex = value.lastIndexOf("::");
+  if (separatorIndex < 0) return null;
+
+  return {
+    rowId: value.slice(0, separatorIndex),
+    columnKey: value.slice(separatorIndex + 2),
+  };
+}
+
+function isEditableTableColumnKey(columnKey) {
+  return !NON_EDITABLE_TABLE_COLUMN_KEYS.has(columnKey);
+}
+
+function isEditableTableCell(columnKey, tableDocument) {
+  return tableDocument?.draftRows?.length === 0 || isEditableTableColumnKey(columnKey);
+}
+
+function isPrintableTableEditKey(event) {
+  return event.key.length === 1;
+}
+
+function isEventFromTextEditingTarget(event) {
+  const target = event.target;
+  if (typeof HTMLElement === "undefined" || !(target instanceof HTMLElement)) return false;
+  return Boolean(target.closest("input, textarea, select, button, [contenteditable='true']"));
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function parseClipboardTableText(text) {
+  const normalizedText = String(text ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const trimmedText = normalizedText.endsWith("\n") ? normalizedText.slice(0, -1) : normalizedText;
+  if (!trimmedText) return [];
+  return trimmedText.split("\n").map((line) => line.split("\t"));
+}
+
+function writeTextToClipboard(text) {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+
+  if (typeof document === "undefined") return Promise.reject(new Error("Clipboard is unavailable."));
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.inset = "0 auto auto 0";
+  textarea.style.opacity = "0";
+  document.body.append(textarea);
+  textarea.select();
+
+  try {
+    document.execCommand("copy");
+    return Promise.resolve();
+  } catch (error) {
+    return Promise.reject(error);
+  } finally {
+    textarea.remove();
+  }
+}
+
+function readTextFromClipboard() {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.readText) {
+    return navigator.clipboard.readText();
+  }
+
+  return Promise.reject(new Error("Clipboard read is unavailable."));
+}
+
+function createImportedTableDocumentId(file) {
+  const name = encodeURIComponent(String(file?.name ?? "spreadsheet.xlsx"));
+  const size = Number.isFinite(file?.size) ? file.size : 0;
+  const lastModified = Number.isFinite(file?.lastModified) ? file.lastModified : 0;
+  return `spreadsheet:${name}:${size}:${lastModified}`;
+}
+
+function isSelectableSpreadsheetOption(option) {
+  if (!option?.id) return false;
+  if (Number(option.rowCount) === 0) return false;
+  if (option.source === "loaded" || option.source === "pane") return true;
+  if (!isSavedProgramDataDocumentId(option.id) && !isImportedSpreadsheetDocumentId(option.id)) return false;
+  return true;
+}
+
+function isSavedProgramDataDocumentId(documentId) {
+  const value = String(documentId ?? "").toLowerCase();
+  return value.startsWith("output:") && value.endsWith(".saved.json");
+}
+
+function isImportedSpreadsheetDocumentId(documentId) {
+  return String(documentId ?? "").toLowerCase().startsWith("spreadsheet:");
 }
 
 function getCellInputMode(columnKey) {
@@ -2784,7 +8044,7 @@ function getCellInputMode(columnKey) {
 
 function getCellAriaLabel(row, column) {
   const rowLabel = row.program || "Program row";
-  return `${rowLabel} ${column.label}`;
+  return `${rowLabel} ${getTableColumnDisplayLabel(column)}`;
 }
 
 function blurActiveTableInput() {
@@ -2794,6 +8054,33 @@ function blurActiveTableInput() {
   if (activeElement instanceof HTMLElement && activeElement.closest(".program-table")) {
     activeElement.blur();
   }
+}
+
+function blurActiveElement() {
+  if (typeof document === "undefined") return;
+
+  const activeElement = document.activeElement;
+  if (activeElement instanceof HTMLElement && activeElement !== document.body) {
+    activeElement.blur();
+  }
+}
+
+function scrollTableCellIntoView(paneId, rowId, columnKey, options = {}) {
+  if (typeof document === "undefined") return;
+
+  window.requestAnimationFrame(() => {
+    const paneSelector = paneId ? `[data-pane-id="${escapeAttributeSelectorValue(paneId)}"] ` : "";
+    const cellSelector = `[data-cell-key="${escapeAttributeSelectorValue(getCellKey(rowId, columnKey))}"]`;
+    document.querySelector(`${paneSelector}${cellSelector}`)?.scrollIntoView({
+      block: "nearest",
+      behavior: options.behavior ?? "auto",
+      inline: "nearest",
+    });
+  });
+}
+
+function escapeAttributeSelectorValue(value) {
+  return String(value ?? "").replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
 }
 
 async function saveBlobToFile(blob, fileName) {
@@ -2825,6 +8112,20 @@ async function saveBlobToFile(blob, fileName) {
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   return true;
+}
+
+async function rememberProjectArchive(blob) {
+  const response = await fetch(PROJECT_ARCHIVE_ENDPOINT, {
+    method: "PUT",
+    headers: { "Content-Type": "application/vnd.signal.project+zip" },
+    body: blob,
+  });
+
+  if (!response.ok) {
+    throw await createResponseError(response, "Could not remember saved project");
+  }
+
+  await parseJsonResponse(response, "remembered project");
 }
 
 function getProgramTitle(data) {
@@ -2975,7 +8276,128 @@ function createRows(data) {
     });
 }
 
-function mergeRowsIntoProgramData(data, rows, cellStyles = {}, projectName) {
+function buildSpreadsheetHierarchy(programData, rows) {
+  const root = createSpreadsheetHierarchyNode({
+    key: "root",
+    label: getProgramTitle(programData),
+    level: "project",
+    levelLabel: "Project",
+    sortIndex: 0,
+  });
+  const departmentsById = new Map((programData?.departments ?? []).map((department) => [department.id, department]));
+  const groupsById = new Map((programData?.program_groups ?? []).map((group) => [group.id, group]));
+  const itemsById = new Map((programData?.program_items ?? []).map((item) => [item.id, item]));
+
+  rows.forEach((row, rowIndex) => {
+    const item = itemsById.get(row.id);
+    const group = groupsById.get(item?.program_group_id ?? row.groupId);
+    const department = departmentsById.get(group?.department_id ?? item?.extensions?.department_id ?? row.departmentId);
+    const path = getSpreadsheetHierarchyPath(row, item, group, department);
+    const totalNsf = computeTotalNsf(row.quantity, row.nsfPerUnit);
+    let node = root;
+
+    addSpreadsheetHierarchyNodeTotal(node, row, totalNsf);
+
+    for (const entry of path) {
+      const localChildKey = `${entry.level}:${normalizeStackingGroupKey(entry.label)}`;
+      let child = node.childMap.get(localChildKey);
+
+      if (!child) {
+        child = createSpreadsheetHierarchyNode({
+          ...entry,
+          key: `${node.key}/${localChildKey}`,
+          sortIndex: rowIndex,
+        });
+        node.childMap.set(localChildKey, child);
+        node.children.push(child);
+      }
+
+      addSpreadsheetHierarchyNodeTotal(child, row, totalNsf);
+      node = child;
+    }
+
+    node.rows.push(row);
+  });
+
+  sortSpreadsheetHierarchyNode(root);
+  return root;
+}
+
+function createSpreadsheetHierarchyNode({ key, label, level, levelLabel, sortIndex }) {
+  return {
+    key,
+    label,
+    level,
+    levelLabel,
+    sortIndex,
+    children: [],
+    childMap: new Map(),
+    rows: [],
+    rowCount: 0,
+    totalNsf: 0,
+  };
+}
+
+function addSpreadsheetHierarchyNodeTotal(node, row, totalNsf) {
+  node.rowCount += 1;
+  node.totalNsf = roundArea(node.totalNsf + totalNsf);
+  node.sortIndex = Math.min(node.sortIndex, row.sortOrder ?? node.sortIndex);
+}
+
+function sortSpreadsheetHierarchyNode(node) {
+  node.children.sort((a, b) => a.sortIndex - b.sortIndex || a.label.localeCompare(b.label));
+  for (const child of node.children) sortSpreadsheetHierarchyNode(child);
+}
+
+function getSpreadsheetHierarchyPath(row, item, group, department) {
+  const path = [];
+
+  for (const level of SPREADSHEET_HIERARCHY_LEVELS) {
+    const label = getSpreadsheetHierarchyLevelLabel(level.value, row, item, group, department);
+    const normalizedLabel = normalizeStackingGroupKey(label);
+    if (!normalizedLabel) continue;
+
+    path.push({
+      level: level.value,
+      levelLabel: level.label,
+      label,
+    });
+  }
+
+  return path;
+}
+
+function getSpreadsheetHierarchyLevelLabel(level, row, item, group, department) {
+  switch (level) {
+    case "department":
+      return firstHierarchyLabel(
+        row.department,
+        department?.name,
+        readStackingProperty(item, ["department_name", "departmentName"]),
+      );
+    case "programGroup":
+      return firstHierarchyLabel(
+        row.programGroup,
+        group?.name,
+        readStackingProperty(item, ["program_group", "programGroup", "program_group_name", "programGroupName"]),
+        readStackingProperty(group, ["program_group", "programGroup", "program_group_name", "programGroupName"]),
+        item?.program_type,
+      );
+    default:
+      return "";
+  }
+}
+
+function firstHierarchyLabel(...values) {
+  for (const value of values) {
+    const label = humanizeStackingLabel(value);
+    if (label) return label;
+  }
+
+  return "";
+}
+
+function mergeRowsIntoProgramData(data, rows, cellStyles = {}, projectName, options = {}) {
   const next = JSON.parse(JSON.stringify(data));
   const nextProjectName = normalizeProjectName(projectName) || getProgramTitle(next);
   next.project = {
@@ -3067,6 +8489,10 @@ function mergeRowsIntoProgramData(data, rows, cellStyles = {}, projectName) {
     }
   }
 
+  if (options.distributeIdenticalRooms) {
+    distributeIdenticalProgramRooms(next);
+  }
+
   next.floors = [...(next.floors ?? [])].sort((a, b) => (a.number ?? 0) - (b.number ?? 0));
   updateGroupDefaultFloors(next);
   updateDerivedTotals(next);
@@ -3074,6 +8500,145 @@ function mergeRowsIntoProgramData(data, rows, cellStyles = {}, projectName) {
   next.project.updated_at = new Date().toISOString();
 
   return next;
+}
+
+function distributeIdenticalProgramRooms(data) {
+  const sourceItems = Array.isArray(data.program_items) ? data.program_items : [];
+  const originalIds = new Set(sourceItems.map((item) => String(item?.id ?? "")).filter(Boolean));
+  const usedIds = new Set();
+  const distributedItems = [];
+
+  for (const [itemIndex, item] of sourceItems.entries()) {
+    const roomCount = getDistributedRoomCount(item.quantity);
+    const baseId = String(item.id || `item-${slugify(item.name || `room-${itemIndex + 1}`)}`);
+
+    if (roomCount <= 1) {
+      distributedItems.push({
+        ...item,
+        id: createUniqueProgramItemId(baseId, usedIds, getReservedProgramItemIds(originalIds, baseId)),
+      });
+      continue;
+    }
+
+    for (let roomIndex = 0; roomIndex < roomCount; roomIndex += 1) {
+      const copyId = roomIndex === 0
+        ? createUniqueProgramItemId(baseId, usedIds, getReservedProgramItemIds(originalIds, baseId))
+        : createUniqueProgramItemId(`${baseId}-room-${roomIndex + 1}`, usedIds, originalIds);
+      const nsfPerUnit = Number(item.nsf_per_unit) || 0;
+      const totalNsf = roundArea(nsfPerUnit);
+
+      distributedItems.push({
+        ...item,
+        id: copyId,
+        quantity: 1,
+        sort_order: distributedItems.length + 1,
+        extensions: {
+          ...(item.extensions ?? {}),
+          spreadsheet_total_nsf: totalNsf,
+          computed_total_nsf: totalNsf,
+          distributed_from_item_id: baseId,
+          distributed_room_index: roomIndex + 1,
+          distributed_room_count: roomCount,
+        },
+      });
+    }
+  }
+
+  data.program_items = distributedItems.map((item, index) => ({
+    ...item,
+    sort_order: index + 1,
+  }));
+}
+
+function consolidateIdenticalProgramRooms(data) {
+  const sourceItems = Array.isArray(data.program_items) ? data.program_items : [];
+  const itemGroups = new Map();
+  const consolidatedItems = [];
+  let didConsolidate = false;
+
+  for (const item of sourceItems) {
+    const key = getProgramRoomConsolidationKey(item);
+    const existingItem = itemGroups.get(key);
+
+    if (!existingItem) {
+      const nextItem = {
+        ...item,
+        extensions: removeDistributionExtensions(item.extensions),
+      };
+      itemGroups.set(key, nextItem);
+      consolidatedItems.push(nextItem);
+      continue;
+    }
+
+    didConsolidate = true;
+    existingItem.quantity = roundArea((Number(existingItem.quantity) || 0) + (Number(item.quantity) || 0));
+    const totalNsf = roundArea((Number(existingItem.quantity) || 0) * (Number(existingItem.nsf_per_unit) || 0));
+    existingItem.extensions = {
+      ...(existingItem.extensions ?? {}),
+      spreadsheet_total_nsf: totalNsf,
+      computed_total_nsf: totalNsf,
+    };
+  }
+
+  if (!didConsolidate) return false;
+
+  data.program_items = consolidatedItems.map((item, index) => ({
+    ...item,
+    sort_order: index + 1,
+  }));
+  return true;
+}
+
+function getProgramRoomConsolidationKey(item) {
+  return JSON.stringify([
+    String(item.program_group_id ?? ""),
+    normalizeStackingGroupKey(item.name ?? ""),
+    roundArea(Number(item.nsf_per_unit) || 0),
+    String(item.floor_id ?? ""),
+    String(getProgramItemDiagramFloorId(item) ?? ""),
+    normalizeProjectName(item.comment ?? ""),
+    normalizeStackingGroupKey(item.program_type ?? ""),
+  ]);
+}
+
+function removeDistributionExtensions(extensions) {
+  if (!isPlainObject(extensions)) return extensions;
+
+  const nextExtensions = { ...extensions };
+  delete nextExtensions.distributed_from_item_id;
+  delete nextExtensions.distributed_room_index;
+  delete nextExtensions.distributed_room_count;
+  return nextExtensions;
+}
+
+function getDistributedRoomCount(quantity) {
+  const numericQuantity = Number(quantity);
+  if (!Number.isFinite(numericQuantity) || numericQuantity <= 1) return 1;
+  return Math.max(1, Math.round(numericQuantity));
+}
+
+function hasDistributableProgramRows(rows) {
+  return (rows ?? []).some((row) => getDistributedRoomCount(parseEditableNumber(row.quantity)) > 1);
+}
+
+function getReservedProgramItemIds(originalIds, currentId) {
+  const reservedIds = new Set(originalIds);
+  reservedIds.delete(currentId);
+  return reservedIds;
+}
+
+function createUniqueProgramItemId(preferredId, usedIds, reservedIds = new Set()) {
+  const baseId = String(preferredId || "item").trim() || "item";
+  let candidate = baseId;
+  let suffix = 2;
+
+  while (usedIds.has(candidate) || reservedIds.has(candidate)) {
+    candidate = `${baseId}-${suffix}`;
+    suffix += 1;
+  }
+
+  usedIds.add(candidate);
+  return candidate;
 }
 
 function updateGroupDefaultFloors(data) {
@@ -3135,15 +8700,6 @@ function updateDerivedTotals(data) {
   };
 }
 
-function summarizeRows(rows) {
-  return rows.reduce(
-    (totals, row) => ({
-      totalNsf: totals.totalNsf + computeTotalNsf(row.quantity, row.nsfPerUnit),
-    }),
-    { totalNsf: 0 },
-  );
-}
-
 function computeTotalNsf(quantity, nsfPerUnit) {
   return roundArea(parseEditableNumber(quantity) * parseEditableNumber(nsfPerUnit));
 }
@@ -3162,6 +8718,362 @@ function formatArea(value) {
   return roundArea(value).toLocaleString(undefined, {
     maximumFractionDigits: 2,
   });
+}
+
+function formatDiagramArea(value) {
+  const roundedValue = Math.round(Number(value) || 0);
+  return roundedValue.toLocaleString();
+}
+
+function getStackingConflictFloorValue(floor, floorKey) {
+  const floorNumber =
+    getFiniteNumber(floor?.number) ??
+    floorNumberFromLabel(floor?.label) ??
+    floorNumberFromId(floorKey);
+  return formatEditableNumber(floorNumber ?? floorKey ?? "");
+}
+
+function getProgramDataStackingSettings(programData) {
+  const diagramSettings = programData?.extensions?.[DIAGRAM_SETTINGS_EXTENSION_KEY];
+  const stackingSettings = diagramSettings?.[DIAGRAM_STACKING_SETTINGS_KEY];
+  return isPlainObject(stackingSettings) ? stackingSettings : {};
+}
+
+function getEffectiveStackingSettingsForProgramData(programData, settings = createDefaultStackingSettings()) {
+  const sourceSettings = getProgramDataStackingSettings(programData);
+  return {
+    ...createDefaultStackingSettings(),
+    ...settings,
+    defaultFloorToFloorFeet: sourceSettings.defaultFloorToFloorFeet ?? settings.defaultFloorToFloorFeet,
+    defaultFloorToFloorInches: sourceSettings.defaultFloorToFloorInches ?? settings.defaultFloorToFloorInches,
+    slabHeight: sourceSettings.slabHeight ?? settings.slabHeight,
+  };
+}
+
+function getStackingHeightSettings(settings = createDefaultStackingSettings()) {
+  const normalizedSettings = {
+    ...createDefaultStackingSettings(),
+    ...settings,
+  };
+
+  return {
+    defaultFloorToFloorFeet: String(normalizedSettings.defaultFloorToFloorFeet ?? "12"),
+    defaultFloorToFloorInches: String(normalizedSettings.defaultFloorToFloorInches ?? "0"),
+    slabHeight: String(normalizedSettings.slabHeight ?? "1"),
+  };
+}
+
+function getStackingHeightSettingsForDimension(dimension, value, fallbackSettings = createDefaultStackingSettings()) {
+  if (dimension.kind === "floor") {
+    return {
+      ...getStackingHeightSettings(fallbackSettings),
+      ...splitFeetInches(value),
+    };
+  }
+
+  if (dimension.kind === "slab") {
+    return {
+      ...getStackingHeightSettings(fallbackSettings),
+      slabHeight: String(roundArea(Math.max(STACKING_MIN_DIMENSION_FEET, value))),
+    };
+  }
+
+  return getStackingHeightSettings(fallbackSettings);
+}
+
+function splitFeetInches(value) {
+  const totalInches = Math.max(0, Math.round((Number(value) || 0) * 12));
+  const feet = Math.floor(totalInches / 12);
+  const inches = totalInches % 12;
+
+  return {
+    defaultFloorToFloorFeet: String(feet),
+    defaultFloorToFloorInches: String(inches),
+  };
+}
+
+function ensureProgramDataDiagramSourceState(programData, settings = createDefaultStackingSettings()) {
+  if (!isPlainObject(programData)) return { data: programData, changed: false };
+
+  const next = JSON.parse(JSON.stringify(programData));
+  let changed = false;
+
+  for (const item of next.program_items ?? []) {
+    if (!isPlainObject(item.extensions)) {
+      item.extensions = {};
+      changed = true;
+    }
+
+    if (!isPlainObject(item.extensions[DIAGRAM_VALUES_EXTENSION_KEY])) {
+      item.extensions[DIAGRAM_VALUES_EXTENSION_KEY] = {};
+      changed = true;
+    }
+
+    const diagramValues = item.extensions[DIAGRAM_VALUES_EXTENSION_KEY];
+    if (diagramValues.floor_id === undefined || diagramValues.floor_id === null || diagramValues.floor_id === "") {
+      diagramValues.floor_id = item.floor_id;
+      changed = true;
+    }
+  }
+
+  if (!isPlainObject(next.extensions)) {
+    next.extensions = {};
+    changed = true;
+  }
+
+  if (!isPlainObject(next.extensions[DIAGRAM_SETTINGS_EXTENSION_KEY])) {
+    next.extensions[DIAGRAM_SETTINGS_EXTENSION_KEY] = {};
+    changed = true;
+  }
+
+  const diagramSettings = next.extensions[DIAGRAM_SETTINGS_EXTENSION_KEY];
+  if (!isPlainObject(diagramSettings[DIAGRAM_STACKING_SETTINGS_KEY])) {
+    diagramSettings[DIAGRAM_STACKING_SETTINGS_KEY] = getStackingHeightSettings(settings);
+    changed = true;
+  } else {
+    const heightSettings = getStackingHeightSettings(settings);
+    const stackingSettings = diagramSettings[DIAGRAM_STACKING_SETTINGS_KEY];
+    for (const [key, value] of Object.entries(heightSettings)) {
+      if (stackingSettings[key] === undefined || stackingSettings[key] === null || stackingSettings[key] === "") {
+        stackingSettings[key] = value;
+        changed = true;
+      }
+    }
+  }
+
+  return changed ? { data: next, changed } : { data: programData, changed: false };
+}
+
+function setProgramDataStackingHeightSettings(programData, heightSettings) {
+  if (!isPlainObject(programData)) return { data: programData, changed: false };
+
+  const next = JSON.parse(JSON.stringify(programData));
+  next.extensions = isPlainObject(next.extensions) ? next.extensions : {};
+  next.extensions[DIAGRAM_SETTINGS_EXTENSION_KEY] = isPlainObject(next.extensions[DIAGRAM_SETTINGS_EXTENSION_KEY])
+    ? next.extensions[DIAGRAM_SETTINGS_EXTENSION_KEY]
+    : {};
+
+  const diagramSettings = next.extensions[DIAGRAM_SETTINGS_EXTENSION_KEY];
+  const currentStackingSettings = isPlainObject(diagramSettings[DIAGRAM_STACKING_SETTINGS_KEY])
+    ? diagramSettings[DIAGRAM_STACKING_SETTINGS_KEY]
+    : {};
+  const nextStackingSettings = {
+    ...currentStackingSettings,
+    ...heightSettings,
+  };
+  const changed = Object.keys(nextStackingSettings).some(
+    (key) => String(currentStackingSettings[key] ?? "") !== String(nextStackingSettings[key] ?? ""),
+  );
+
+  if (!changed) return { data: programData, changed: false };
+
+  diagramSettings[DIAGRAM_STACKING_SETTINGS_KEY] = nextStackingSettings;
+  next.project = {
+    ...(next.project ?? {}),
+    updated_at: new Date().toISOString(),
+  };
+
+  return { data: next, changed: true };
+}
+
+function updateProgramDataFloorAssignments(programData, floorIdsByItemId, target = "diagram") {
+  if (!isPlainObject(programData) || !(floorIdsByItemId instanceof Map) || floorIdsByItemId.size === 0) {
+    return { data: programData, changed: false };
+  }
+
+  const next = JSON.parse(JSON.stringify(programData));
+  let changed = false;
+
+  for (const item of next.program_items ?? []) {
+    const nextFloorId = floorIdsByItemId.get(String(item.id ?? ""));
+    if (!nextFloorId) continue;
+
+    ensureProgramDataFloor(next, nextFloorId);
+
+    if (target === "spreadsheet") {
+      if (String(item.floor_id ?? "") === String(nextFloorId)) continue;
+      item.floor_id = nextFloorId;
+      item.extensions = isPlainObject(item.extensions) ? item.extensions : {};
+      item.extensions.original_floor_label = formatEditableNumber(floorNumberFromId(nextFloorId) ?? nextFloorId);
+      changed = true;
+      continue;
+    }
+
+    item.extensions = isPlainObject(item.extensions) ? item.extensions : {};
+    item.extensions[DIAGRAM_VALUES_EXTENSION_KEY] = isPlainObject(item.extensions[DIAGRAM_VALUES_EXTENSION_KEY])
+      ? item.extensions[DIAGRAM_VALUES_EXTENSION_KEY]
+      : {};
+    const diagramValues = item.extensions[DIAGRAM_VALUES_EXTENSION_KEY];
+    if (String(diagramValues.floor_id ?? "") === String(nextFloorId)) continue;
+
+    diagramValues.floor_id = nextFloorId;
+    changed = true;
+  }
+
+  if (!changed) return { data: programData, changed: false };
+
+  if (target === "spreadsheet") {
+    updateGroupDefaultFloors(next);
+    updateDerivedTotals(next);
+  }
+
+  next.project = {
+    ...(next.project ?? {}),
+    updated_at: new Date().toISOString(),
+  };
+
+  return { data: next, changed: true };
+}
+
+function ensureProgramDataFloor(programData, floorId) {
+  const floorNumber = floorNumberFromId(floorId);
+  if (floorNumber == null) return false;
+
+  programData.floors = Array.isArray(programData.floors) ? programData.floors : [];
+  if (programData.floors.some((floor) => floor.id === floorId)) return false;
+
+  programData.floors.push({
+    id: floorId,
+    number: floorNumber,
+    name: `Floor ${floorNumber}`,
+  });
+  programData.floors.sort((a, b) => (a.number ?? 0) - (b.number ?? 0));
+  return true;
+}
+
+function getFloorIdForStackingValue(value, fallbackFloorId = "") {
+  return normalizeFloor(value, fallbackFloorId || undefined).id;
+}
+
+function getProgramDataFloorValue(programData, floorId, fallbackValue = "") {
+  const floor = (programData?.floors ?? []).find((candidate) => candidate.id === floorId);
+  const floorNumber =
+    getFiniteNumber(floor?.number) ??
+    floorNumberFromId(floorId) ??
+    floorNumberFromLabel(floor?.name) ??
+    floorNumberFromLabel(fallbackValue) ??
+    getFiniteNumber(fallbackValue);
+
+  return formatEditableNumber(floorNumber ?? fallbackValue ?? "");
+}
+
+function getProgramDataFloorLabel(programData, floorId, fallbackValue = "") {
+  const floor = (programData?.floors ?? []).find((candidate) => candidate.id === floorId);
+  const floorValue = getProgramDataFloorValue(programData, floorId, fallbackValue);
+  return floor?.name || (floorValue ? `Floor ${floorValue}` : "Floor");
+}
+
+function normalizeFloorConflictValue(value, fallbackFloorId = "") {
+  const floorNumber = floorNumberFromLabel(value) ?? getFiniteNumber(value) ?? floorNumberFromId(fallbackFloorId);
+  return formatEditableNumber(floorNumber ?? value ?? "");
+}
+
+function createStackingConflictId(documentId, sourceFloorValue, targetFloorValue) {
+  return [
+    "stacking-conflict",
+    encodeURIComponent(String(documentId || DEFAULT_TABLE_DOCUMENT_ID)),
+    "floor",
+    encodeURIComponent(String(sourceFloorValue ?? "")),
+    encodeURIComponent(String(targetFloorValue ?? "")),
+  ].join(":");
+}
+
+function deriveStackingConflictsForDocument(documentId, tableDocument, previousConflicts = []) {
+  const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
+  const programData = tableDocument?.programData;
+  const rows = Array.isArray(tableDocument?.draftRows) ? tableDocument.draftRows : [];
+  if (!isPlainObject(programData) || rows.length === 0) return [];
+
+  const rowsById = new Map(rows.map((row) => [String(row.id), row]));
+  const previousById = new Map(
+    previousConflicts
+      .filter((conflict) => (conflict.documentId || DEFAULT_TABLE_DOCUMENT_ID) === normalizedDocumentId)
+      .map((conflict) => [conflict.id, conflict]),
+  );
+  const groups = new Map();
+
+  for (const item of programData.program_items ?? []) {
+    const row = rowsById.get(String(item.id ?? ""));
+    const explicitDiagramFloorId = getProgramItemExplicitDiagramFloorId(item);
+    if (!row || !explicitDiagramFloorId) continue;
+
+    const sourceFloorValue = normalizeFloorConflictValue(row.floor, item.floor_id);
+    const targetFloorValue = normalizeFloorConflictValue(
+      getProgramDataFloorValue(programData, explicitDiagramFloorId, explicitDiagramFloorId),
+      explicitDiagramFloorId,
+    );
+    if (!sourceFloorValue || !targetFloorValue || doFloorValuesMatch(sourceFloorValue, targetFloorValue)) continue;
+
+    const conflictId = createStackingConflictId(normalizedDocumentId, sourceFloorValue, targetFloorValue);
+    const sourceFloorId = getFloorIdForStackingValue(sourceFloorValue, item.floor_id);
+    const group = groups.get(conflictId) ?? {
+      id: conflictId,
+      columnKey: "floor",
+      documentId: normalizedDocumentId,
+      rowIds: [],
+      segmentLabel: "",
+      sourceDiagramPaneId: "",
+      sourceFloorKey: sourceFloorId,
+      sourceFloorLabel: getProgramDataFloorLabel(programData, sourceFloorId, sourceFloorValue),
+      sourceFloorValue,
+      status: previousById.get(conflictId)?.status === "ignored" ? "ignored" : "pending",
+      targetFloorKey: explicitDiagramFloorId,
+      targetFloorLabel: getProgramDataFloorLabel(programData, explicitDiagramFloorId, targetFloorValue),
+      targetFloorValue,
+    };
+
+    group.rowIds.push(row.id);
+    groups.set(conflictId, group);
+  }
+
+  return [...groups.values()].map((conflict) => ({
+    ...conflict,
+    rowIds: [...new Set(conflict.rowIds)],
+    segmentLabel: getStackingConflictGroupLabel(conflict, rowsById),
+  }));
+}
+
+function mergeStackingConflictsForDocument(conflicts, documentId, tableDocument) {
+  const normalizedDocumentId = documentId || DEFAULT_TABLE_DOCUMENT_ID;
+  return [
+    ...conflicts.filter((conflict) => (conflict.documentId || DEFAULT_TABLE_DOCUMENT_ID) !== normalizedDocumentId),
+    ...deriveStackingConflictsForDocument(normalizedDocumentId, tableDocument, conflicts),
+  ];
+}
+
+function getStackingConflictGroupLabel(conflict, rowsById) {
+  const rowIds = conflict.rowIds ?? [];
+  if (rowIds.length === 1) {
+    const row = rowsById.get(String(rowIds[0]));
+    return row?.program || row?.programGroup || row?.department || "Program row";
+  }
+
+  return `${rowIds.length} program rows`;
+}
+
+function doFloorValuesMatch(value, expectedValue) {
+  const valueNumber = floorNumberFromLabel(value) ?? getFiniteNumber(value);
+  const expectedNumber = floorNumberFromLabel(expectedValue) ?? getFiniteNumber(expectedValue);
+
+  if (valueNumber != null && expectedNumber != null) return valueNumber === expectedNumber;
+  return String(value ?? "").trim() === String(expectedValue ?? "").trim();
+}
+
+function getStackingConflictExplanation(conflict) {
+  const rowCount = conflict.rowIds?.length ?? 0;
+  const subject = rowCount === 1 ? "one program row" : `${rowCount} program rows`;
+  const verb = rowCount === 1 ? "was" : "were";
+  return `${conflict.segmentLabel} ${verb} moved from ${conflict.sourceFloorLabel} to ${conflict.targetFloorLabel} in the stacking diagram, but the Floor ${rowCount === 1 ? "cell still shows" : "cells still show"} the previous spreadsheet value. Update ${subject} to Floor ${conflict.targetFloorValue}.`;
+}
+
+function getStackingConflictCausalityTitle(conflict) {
+  return conflict.segmentLabel || "Dragged rectangle";
+}
+
+function getStackingConflictCausalityMeta(conflict) {
+  const rowCount = conflict.rowIds?.length ?? 0;
+  const cellLabel = rowCount === 1 ? "1 cell" : `${rowCount} cells`;
+  return `${conflict.sourceFloorLabel} to ${conflict.targetFloorLabel} - ${cellLabel}`;
 }
 
 function normalizeFloor(value, fallbackFloorId) {

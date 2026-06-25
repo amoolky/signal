@@ -4,8 +4,10 @@ export const SIGNAL_PROJECT_FORMAT = "signal.project";
 export const SIGNAL_PROJECT_VERSION = "0.1.0";
 
 const DEFAULT_PROGRAM_DISPLAY_PATH = "tables/program/display.json";
+const DEFAULT_WORKSPACE_SESSION_PATH = "workspace/session.json";
+const DEFAULT_TABLE_DOCUMENT_ID = "default-table-document";
 
-export function createSignalProjectArchive({ programData, tableState = {}, existingArchiveBuffer } = {}) {
+export function createSignalProjectArchive({ programData, tableState = {}, workspaceState = {}, existingArchiveBuffer } = {}) {
   if (!programData || typeof programData !== "object") {
     throw new Error("A project archive requires program data.");
   }
@@ -13,22 +15,23 @@ export function createSignalProjectArchive({ programData, tableState = {}, exist
   const existing = existingArchiveBuffer ? readSignalProjectArchive(existingArchiveBuffer, { includeEntries: true }) : null;
   const entries = existing?.entries ? new Map(existing.entries) : new Map();
   const existingManifest = existing?.manifest;
+  const normalizedWorkspaceState = normalizeWorkspaceState(workspaceState);
+  const programDocuments = getSignalProjectProgramDataDocuments({
+    programData,
+    workspaceState: normalizedWorkspaceState,
+  });
+  const activeDocumentId = getActiveTableDocumentId(normalizedWorkspaceState);
+  const currentProgramDocument =
+    programDocuments.find((document) => document.documentId === activeDocumentId) ??
+    programDocuments.find((document) => document.documentId === DEFAULT_TABLE_DOCUMENT_ID) ??
+    programDocuments[0];
   const now = new Date().toISOString();
-  const projectName = programData.project?.name || "Untitled Project";
-  const projectId = programData.project?.id || slugify(projectName);
-  const versionId = uniqueEntryId(`program-${timestampSlug(now)}`, entries, ".json");
-  const programPath = `programs/${versionId}/program_data.json`;
-  const programVersion = {
-    id: versionId,
-    label: projectName,
-    created_at: now,
-    path: programPath,
-    schema_version: programData.schema_version,
-  };
-
-  const priorVersions = Array.isArray(existingManifest?.program_versions)
-    ? existingManifest.program_versions.filter((version) => version?.path && entries.has(version.path))
-    : [];
+  const projectName = currentProgramDocument?.data?.project?.name || programData.project?.name || "Untitled Project";
+  const projectId = currentProgramDocument?.data?.project?.id || programData.project?.id || slugify(projectName);
+  const programVersions = createProgramVersionEntries(programDocuments, entries, now);
+  const currentProgramVersion =
+    programVersions.find((version) => version.document_id === currentProgramDocument?.documentId) ??
+    programVersions[0];
 
   const manifest = {
     format: SIGNAL_PROJECT_FORMAT,
@@ -40,22 +43,120 @@ export function createSignalProjectArchive({ programData, tableState = {}, exist
       name: projectName,
     },
     current: {
-      program_version_id: versionId,
+      program_version_id: currentProgramVersion.id,
     },
-    program_versions: [...priorVersions, programVersion],
+    program_versions: programVersions,
     table_displays: {
       program: {
         path: DEFAULT_PROGRAM_DISPLAY_PATH,
       },
+    },
+    workspace_session: {
+      path: existingManifest?.workspace_session?.path || DEFAULT_WORKSPACE_SESSION_PATH,
     },
     drawings: existingManifest?.drawings ?? [],
     diagrams: existingManifest?.diagrams ?? [],
   };
 
   entries.set("manifest.json", jsonBuffer(manifest));
-  entries.set(programPath, jsonBuffer(programData));
   entries.set(DEFAULT_PROGRAM_DISPLAY_PATH, jsonBuffer(normalizeTableState(tableState)));
+  entries.set(manifest.workspace_session.path, jsonBuffer(normalizedWorkspaceState));
   return writeZipEntries(entries);
+}
+
+export function getSignalProjectProgramDataDocuments({ programData, workspaceState = {} } = {}) {
+  const documents = [];
+  const usedKeys = new Set();
+  const tableDocuments = isPlainObject(workspaceState?.tableDocuments) ? workspaceState.tableDocuments : {};
+
+  for (const [documentId, tableDocument] of Object.entries(tableDocuments)) {
+    const tableProgramData = tableDocument?.programData;
+    if (!isUsableProgramData(tableProgramData)) continue;
+
+    const key = getProgramDataStorageKey(documentId, tableProgramData);
+    if (usedKeys.has(key)) continue;
+
+    usedKeys.add(key);
+    documents.push({
+      documentId,
+      data: tableProgramData,
+      label: tableDocument?.draftProjectName || tableProgramData.project?.name || "Untitled Project",
+    });
+  }
+
+  if (documents.length === 0) {
+    documents.push({
+      documentId: DEFAULT_TABLE_DOCUMENT_ID,
+      data: programData,
+      label: programData?.project?.name || "Untitled Project",
+    });
+  }
+
+  return documents;
+}
+
+function createProgramVersionEntries(programDocuments, entries, now) {
+  removeProgramDataEntries(entries);
+
+  const usedIds = new Set();
+  return programDocuments.map((document) => {
+    const sourceFile = document.data?.project?.source_files?.[0];
+    const baseId = `program-${slugify(sourceFile?.id || sourceFile?.name || document.documentId || document.label)}`;
+    const id = uniqueId(baseId, usedIds);
+    const path = `programs/${id}/program_data.json`;
+
+    entries.set(path, jsonBuffer(document.data));
+
+    return {
+      id,
+      label: document.label || document.data?.project?.name || "Untitled Project",
+      created_at: sourceFile?.imported_at ?? document.data?.project?.created_at ?? now,
+      updated_at: document.data?.project?.updated_at ?? now,
+      path,
+      schema_version: document.data?.schema_version,
+      document_id: document.documentId,
+      source_file_name: sourceFile?.name ?? null,
+      row_count: Array.isArray(document.data?.program_items) ? document.data.program_items.length : 0,
+    };
+  });
+}
+
+function removeProgramDataEntries(entries) {
+  for (const entryName of [...entries.keys()]) {
+    if (/^programs\/[^/]+\/program_data\.json$/.test(entryName)) {
+      entries.delete(entryName);
+    }
+  }
+}
+
+function getActiveTableDocumentId(workspaceState) {
+  const activePaneId = workspaceState?.activeTablePaneId;
+  if (!activePaneId || !Array.isArray(workspaceState?.workspaceSlots)) return "";
+
+  const activeSlot = workspaceState.workspaceSlots.find((slot) => slot?.id === activePaneId);
+  return String(activeSlot?.tableState?.documentId ?? "");
+}
+
+function getProgramDataStorageKey(documentId, data) {
+  const sourceFile = data?.project?.source_files?.[0];
+  return [
+    sourceFile?.checksum,
+    sourceFile?.name,
+    data?.project?.id,
+    documentId,
+  ].filter(Boolean).join(":");
+}
+
+function isProgramData(data) {
+  return Boolean(data && typeof data === "object" && data.project && Array.isArray(data.program_items));
+}
+
+function isUsableProgramData(data) {
+  return isProgramData(data) && data.program_items.length > 0;
+}
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 export function readSignalProjectArchive(buffer, { includeEntries = false } = {}) {
@@ -78,11 +179,14 @@ export function readSignalProjectArchive(buffer, { includeEntries = false } = {}
   const programData = parseJsonEntry(entries, programVersion.path);
   const tableDisplayPath = manifest.table_displays?.program?.path ?? DEFAULT_PROGRAM_DISPLAY_PATH;
   const tableState = entries.has(tableDisplayPath) ? parseJsonEntry(entries, tableDisplayPath) : {};
+  const workspaceSessionPath = manifest.workspace_session?.path ?? DEFAULT_WORKSPACE_SESSION_PATH;
+  const workspaceState = entries.has(workspaceSessionPath) ? parseJsonEntry(entries, workspaceSessionPath) : {};
 
   return {
     manifest,
     programData,
     tableState,
+    workspaceState,
     ...(includeEntries ? { entries } : {}),
   };
 }
@@ -94,6 +198,10 @@ function normalizeTableState(tableState) {
       advancedSortConfig: tableState?.program?.advancedSortConfig ?? null,
     },
   };
+}
+
+function normalizeWorkspaceState(workspaceState) {
+  return workspaceState && typeof workspaceState === "object" ? workspaceState : {};
 }
 
 function parseJsonEntry(entries, entryName) {
@@ -231,18 +339,15 @@ function findEndOfCentralDirectory(buffer) {
   throw new Error("Could not find ZIP end of central directory record.");
 }
 
-function uniqueEntryId(base, entries, extension) {
+function uniqueId(base, usedIds) {
   let candidate = base;
   let suffix = 2;
-  while (entries.has(`programs/${candidate}/program_data${extension}`)) {
+  while (usedIds.has(candidate)) {
     candidate = `${base}-${suffix}`;
     suffix += 1;
   }
+  usedIds.add(candidate);
   return candidate;
-}
-
-function timestampSlug(value) {
-  return String(value).replace(/\D/g, "").slice(0, 14) || "version";
 }
 
 function toDosDateTime(date) {
