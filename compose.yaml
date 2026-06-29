@@ -1,0 +1,17 @@
+services:
+  signal:
+    build: .
+    restart: unless-stopped
+    # ALLOWED_HOSTS (public hostname for the Vite dev server) — created by the deploy
+    # workflow. Signal has no API keys, so there are no secrets here.
+    env_file: .env
+    # Bound to localhost only — the VM's existing nginx proxies to this port.
+    ports:
+      - "127.0.0.1:5181:5181"
+    # Named volume holds user-saved program data / .signal projects so they survive
+    # redeploys. Seeded from the image's demo data on first boot (docker-entrypoint.sh).
+    volumes:
+      - signal-output:/app/output
+
+volumes:
+  signal-output:

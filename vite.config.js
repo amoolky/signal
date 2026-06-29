@@ -20,6 +20,15 @@ const DEFAULT_DOCUMENT_TITLE = "Untitled";
 
 export default defineConfig({
   plugins: [react(), programDataApi()],
+  // Served behind the VM's nginx (TLS). `ALLOWED_HOSTS` is a comma-separated list of
+  // public hostnames; if unset, allow any host (the container only binds to localhost).
+  server: {
+    host: true,
+    allowedHosts: process.env.ALLOWED_HOSTS
+      ? process.env.ALLOWED_HOSTS.split(",").map((h) => h.trim()).filter(Boolean)
+      : true,
+    hmr: { protocol: "wss", clientPort: 443 },
+  },
 });
 
 function programDataApi() {

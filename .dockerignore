@@ -1,0 +1,12 @@
+.git
+node_modules
+dist
+.vite
+.env
+.env.*
+*.log
+.DS_Store
+output/chrome-profile
+output/imports
+.agents
+.codex
