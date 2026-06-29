@@ -4,7 +4,7 @@
     "id": "medical-hospital-architectural-program",
     "name": "Medical / Hospital Architectural Program",
     "created_at": "2026-06-25T20:40:19.398Z",
-    "updated_at": "2026-06-25T20:40:26.367Z",
+    "updated_at": "2026-06-29T15:32:45.168Z",
     "source_files": [
       {
         "id": "source-medical-hospital-program",
@@ -7029,7 +7029,7 @@
         "original_floor_label": "6",
         "department_id": "dept-behavioral-health",
         "diagram_values": {
-          "floor_id": "floor-7"
+          "floor_id": "floor-6"
         }
       }
     },
@@ -7057,7 +7057,7 @@
         "original_floor_label": "6",
         "department_id": "dept-behavioral-health",
         "diagram_values": {
-          "floor_id": "floor-7"
+          "floor_id": "floor-6"
         }
       }
     },
@@ -7085,7 +7085,7 @@
         "original_floor_label": "6",
         "department_id": "dept-behavioral-health",
         "diagram_values": {
-          "floor_id": "floor-7"
+          "floor_id": "floor-6"
         }
       }
     },
@@ -7114,7 +7114,7 @@
         "original_floor_label": "6",
         "department_id": "dept-behavioral-health",
         "diagram_values": {
-          "floor_id": "floor-7"
+          "floor_id": "floor-6"
         }
       }
     },
@@ -7142,7 +7142,7 @@
         "original_floor_label": "6",
         "department_id": "dept-behavioral-health",
         "diagram_values": {
-          "floor_id": "floor-7"
+          "floor_id": "floor-6"
         }
       }
     },
@@ -7170,7 +7170,7 @@
         "original_floor_label": "6",
         "department_id": "dept-behavioral-health",
         "diagram_values": {
-          "floor_id": "floor-7"
+          "floor_id": "floor-6"
         }
       }
     },
@@ -12724,7 +12724,13 @@
       "stacking": {
         "defaultFloorToFloorFeet": "12",
         "defaultFloorToFloorInches": "0",
-        "slabHeight": "1"
+        "slabHeight": "1",
+        "slabHeights": {
+          "slab:2:1": "1"
+        },
+        "floorHeights": {
+          "1": "15"
+        }
       }
     }
   }

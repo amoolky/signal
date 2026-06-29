@@ -1,0 +1,166 @@
+program app
+
+filtering (totals/subtotals)
+versioning
+diagram generation
+side-by-side comparison (in spreadsheet, with single control distributed across options)
+
+building -> functional group -> department function -> department -> functional area -> rooms
+
+
+let's completely change the general structure of the application. redesign based on this new structure:
+
+when launching the app and selecting 'new project', the workspace should open up with a white background and a small plus icon in the middle, styled the same as existing button styling. pressing the plus button should pop-up a radial set of icons that are evenly spaced radially. the icons/buttons should currently include the table/matrix and diagrams buttons. selecting one of these buttons should show that interface as a full-screen application.
+
+
+
+the dropdown should wrap cleanly around the spreadsheet title text and should not shift it (and the table below) down. also, the dropdown menu should contain all of the available parsed JSON files from the project, including files open in other spreadsheet panes.
+
+
+
+the dropdown menu with the spreadsheet list should contain only unique JSON saved copy files that have been created. it should not include duplicates (eg. the imported parsed json AND the saved copy) or blank/unedited files (the blank "untitled project" entries)
+
+also, lets change the functionality of the spreadsheet editor to mimic excel:
+
+clicking on a cell should highlight the cell but not show the text editing blinking cursor
+if a user double-clicks in a cell, it should show the blinking cursor and allow them to type freely
+if a user types while a cell is selected, it should allow them to type but completely replace the existing content of the cell. pressing escape should cancel the new content and revert to the cell's old content.
+
+Add a row number column at the left of every imported spreadsheet, and put the column letter in the format "A", "B", etc. before each column title, with a space between the letter format and the name
+
+
+
+import and save buttons in spreadsheet panel can be smaller.
+
+make a settings button to the left of the import button, which should open a dialog (empty for now).
+
+add a "Default Width" control to the diagrams sidebar UI under the Default floor-to-floor height control.
+
+now add a generate button at the bottom of the diagrams sidebar UI. clicking this should use the parameters set above (default floor to floor height, level of detail, text size, gross/net square footage toggles, and source) to create a healthcare 'stacking' diagram. this means that the are outside of the sidebar UI should be a canvas-based workflow; no grid is necessary. the logic of how this should work:
+
+square footages should be summed/compiled based on the level of detail from the source JSON file. each summation should be associated with its correct label from the level of detail (eg. if level of detail is "Department", then "Typical Bed Unit-32" as an example could be summed if that were a department name. however, summations should be separated by floor number. this is non negotiable. eg. if some rooms/programs in the same department are on separate floors, then they should by floor. so summations should be attributed by level of detail type/name and floor.
+
+once all the summations are complete, use the default width entered to generate a stacking diagram. the logic behind this diagram:
+
+each floor should contain rectangles with a default height of the floor-to-floor height. these rectangles should be horizontally adjacent to each other. the width of each rectangle on each floor should be proportional to the default width parameter as its percentage proportion of total square footage of the floor. so if a department "A" on floor 1 is 10000 SF and the sum of all programs on floor 1 is 35000 SF, the rectangle with department "A" on floor 1 should be 2/7ths of the default width.
+
+do this for each floor, stacking all of the programs vertically based on their floor and the default floor-to-floor height. draw a horizontal rectangle between each floor's rectangles with the default width and a 1'0" height.
+
+
+
+updates to the generated stacking diagram:
+
+remove the label "x ft default width"
+
+make the fill of the floor plates white, with the black border
+
+add architectural dimensions to each floor and each slab, so that the height of the building is an array of continuous dimensions. each dimension number should be editable and should update the height of the rectangles in the corresponding floor/slab and update the other parts of the diagram accordingly. there should also be an architectural dimension for the entirety of the width, underneath the diagram, which should update the width of the overall diagram.
+
+the canvas with the stacking diagram should operate as an actual canvas (consider using React-Konva) so that the user can zoom in/out (implement this), and eventually drag and resize objects (don't implement this yet). the text should not scale with the canvas zoom, but all of the objects and other elements should.
+
+
+
+zoom function should zoom in to the point the user is hovering over with their cursor.
+
+pressing and holding space should activate a pan tool, where the user can click and drag to move the view on the canvas.
+
+the dimensions should not contain a text box for the number by default. clicking the value should show the text box.
+
+change the format of the dimension values to be X'-x".
+
+The dimension lines perpendicular to the actual dimension should have a buffer between themselves and the diagram itself, so that they are slightly disconnected. both the parallel and perpendicular dimension lines to the diagram should extend past their intersection points on the dimension side, however.
+
+
+
+use brighter colors for the stacking diagram
+
+
+let's make the stacking diagram interactive, so that users can change the position of different rectangles. the user should be able to perform two kinds of actions while clicking and dragging a rectangle:
+
+within its own floor: this should reorder the rectangle with the other rectangles on the floor. while the user is dragging the rectangle, it should show a preview of where it would snap to in the order of the rectangles, and it should update the positions of all other rectangles live. it should use the rectangle's original centerpoint and check whether or not that has crossed through the halfway point of the two centerpoints of the two closest adjacent rectangles to determine which position the rectangle should snap to.
+
+between floors: if the rectangle leaves its floor, the size of all remaining rectangles on that floor should update to take up the correct percentage of horizontal space depending on their percent square footage of the total square footage on that floor (same as current algorithm for rectangle width sizing). when the rectangle is dragged over a new floor, the rectangles on the new floor should update their widths exactly the same way, now taking into account the square footage of the rectangle being dragged into the floor. then, it should use the exact same horizontal re-ordering logic to display a previewed snapped position and adjust the position of other rectangles accordingly.
+
+
+
+the information conflict warnings work perfectly when a conflict is created, but if the user were to move the initially moved rectangle back to their initial value (floor), the warning remains. run a check whenever a rectangle is moved to determine not only if it's creating an information conflict but also if it's resolving conflicting information. If so, the associated warning and UI changes should be removed.
+
+
+
+there are some bugs with how the stacking diagram is built. let me clarify a new logic about how the diagram should display based on the new information conflict architecture. 
+
+instead of having the user generate the diagram by clicking the generate button, selecting a source document should automatically generate the diagram in the correct level of detail with the other provided parameters. if the user selects the same source document that already is selected from the dropdown, nothing should change. therefore, remove the generate button from the bottom of the diagrams sidebar.
+
+currently, when the user changes an object in the stacking diagram, it shows an information conflict in the spreadsheet panel that highlights the affected values. this is correct and should be retained. however, if the user were to change the level of detail in the diagrams sidebar UI, eg. from functional area to department (in this case, upwards in hierarchy), the changes made in the original level of detail are not saved and the new diagram in a different level of detail defaults back to the spreadsheet data. even if the user does ctrl+s or saves the project manually, the diagram in the new level of detail represents the original spreadsheet data, not the updated version in the diagram. for this reason, let's create the following system of data read/write/transfer:
+
+the user, upon creating a new project, must always start with a spreadsheet import before creating a diagram. this spreadsheet is parsed into a json, where it lives in the back-end and can be manipulated and saved like normal. when a diagram sets its source to a spreadsheet, create a new attribute for each individual room/program floor value that is duplicated and tied to the diagram view. so, for example, the JSON file will have "floor_id" and "floor_id_diagram" attributes.
+
+any changes that occur in the diagram view should only update the floor_id_diagram attribute, NOT the original floor_id attribute. this should automatically save so that when a user changes the level of detail in a diagram, the diagram algorithm reads the diagram-specific values, NOT the original floor_id (or in the future, other original) value.
+
+information conflicts can now easily be identified through testing whether floor_id and floor_id_diagram are different. continue to group information conflicts when they contain the same information difference.
+
+when the user opts to resolve a conflict, simply convert either floor_id or floor_id_diagram to match the other, depending on the direction. ie. if the user chooses to update a spreadsheet cell conflict to match the diagram, floor_id attributes should be updated to match their corresponding floor_id_diagram values. and if the user selects the opposite option, the opposite should happen.
+
+before proceeding, identify whether you think this is a good idea for data storage and functionality, and list any edge cases you can think of that I haven't described. only begin implementing this feature when I type the phrase "implement feature"
+
+
+
+
+remove all saved project info from the back-end, as if the user was opening the application for the first time
+
+
+
+let's modify the following:
+
+
+add another numeric foot inches input under grid spacing and label it "Structural Grid"
+
+make the pan tool icon a hand like the pan cursor
+
+change the grid spacing option to be synchronized between all floors, and make "structural grid" also synchronized between all floors
+
+user's rectangle and polyline drawing should snap to points in the following hierarchy: (1) snap to existing end points/vertices of geometry, (2) snap to the structural grid, (3) snap to the overall grid
+
+the structural grid should have much darker lines than the major grid lines on the canvas, and should be in the exact same world location in each tab/floor.
+
+selecting an object should show x and y dimensions on the side. reference modern drawing applications for this feature, and style the dimensions similarly to the dimensions in the stacking diagram. make sure the dimensions are editable and that they update the width/height of the shape.
+
+when user clicks and drags object to move it, it should follow same snapping logic as above.
+
+user should be able to shift+click to select multiple objects, and ctrl+click an object to remove it from the selection.
+
+when user hovers over the edge of a shape, the 'scale' cursor should appear. user should be able to click and drag that edge in a direction normal to itself to modify the shape.
+
+
+
+move the control for hierarchical vs. spreadsheet mode in the spreadsheet panel to the spreadsheet panel footer and remove it from the spreadsheet settings menu. make it into a toggle button that changes from a matrix icon to a row icon (3x3 squares icon to a 3 rectangular bars icon). both variations buttons should have a black icon on white background with a thin black border. hover state should invert. change settings and import buttons to have an inverted color hover state, and a black border instead of a gray border.
+
+
+
+let's color code the parsed JSON file so that each program has a unique color. always begin at the top of the hierarchy that exists (functional group if it exists, then department function if it exists, etc.), then work down so that each sub-group of the highest existing hierarchy has a variation of the parent's color. eg. the highest hierarchical element in the program JSON is a department, so assign each department a unique color. then, assign each functional area within the department a shade of that color, and then each program/room within each functional area a unique shade of the functional area's color. Then display these colors at 40% opacity as the fill of the dropdowns in hierarchical mode of the spreadsheet viewer, and as the background color of each room row in the tables underneath the dropdowns.
+
+the stacking diagram should also correlate to these colors instead of randomly generating colors to assign to the different groups.
+
+
+
+
+let's build a 'programming mode', where users can assign any level of detail attributes to drawn geometries. in this mode, the selected level of detail for each floor tab is critical, as it will dictate the attribute type that users can assign to geometries.
+
+in another section below the drawing tools on the diagrams sidebar panel, under a horizontal line, title the section "Programming". in this section, show a list of buttons, with one button per data instance in the hierarchical level selected. eg. if 'department' is selected in the level of detail dropdown, show a list of buttons, with each button corresponding to a department. the buttons should be the same shape as the drawing tools (rounded rectangle), but take up the full width of the sidebar UI. each button should contain a smaller rounded rectangle on the left with the associated color of the datatype as the fill, and no stroke. to the right should be the name of the datatype (eg. for departments, "Typical Bed Unit-32 ICU"). buttons should have an outline with their associated color. selecting a button should deselect all other buttons and make the border stronger, as well as fill the button with a 20% opacity fill of the associated color. hover state should show a 10% opacity fill of the associated color. clicking a button and then clicking on a geometry should assign that geometry the selected attribute. clicking a button that is already selected should deselect the button.the user should be able to click as many geometries as they would like to before changing the selected button or deselecting the button.
+
+
+
+when user selects geometry in the blocking diagram, it should highlight the corresponding hierarchical information in the hierarchical spreadsheet mode (eg. if i draw a rectangle, set its department to X, and then click on it, the hierarchical mode should scroll to that department X and highlight it. this should be dependent on the level of detail/hierarchical level set in the blocking diagram options. if the LOD is set to program/room, then clicking a rectangle with a certain program/room should highlight that program/room only, and open the corresponding table for it).
+
+
+
+
+let's implement a critical data relation feature that dictates how blocking diagram data is transferred between levels of detail. the core concept for this data organization/logic is that the lowest level of detail is ALWAYS the most accurate source of truth. i say 'most accurate' and not 'single' because the application is built on 'multiple truths' through information conflicts, rather than automatic resolutions. therefore, the information built in the room LOD transcends that of the functional area LOD, which transcends department, etc.
+
+therefore, the logic of attribution, drawing, and geometry between LODs is as follows:
+
+any geometry drawn on an LOD should not be editable on another LOD. eg. a department geometry should not be editable when the user switches the LOD to 'functional area'.
+
+the current LOD should display the geometry of the LOD directly above it (in every case but functional group) as a PREVIEW ONLY: it should NOT be editable, but instead just a grayed outline. make the text labels very light opacity and behind any geometry and text in the current LOD.
+
+if the user assigns a hierarchical attribute to a higher LOD, but a lower LOD conflicts with it, then use the same information conflict UI to place the warning icon along with a description next to the higher LOD geometry with the conflict. an example: user draws geometry in department level and gives it department A from the programming tab. user then switches to functional area LOD and draws a geometry outside of the bounding area of department A, then assigns it functional area A1 (under department A). since the lower LOD (functional area) is conflicting with the higher LOD (department), the lower LOD is the 'source of truth'. therefore, place the warning icon with a description and remedy options in the department LOD only, but show a faded preview of it in the functional area LOD. the remedies for a geometry conflict: (1) Update area to include {Program} (2) Recalculate area to fit child functional areas (3) Ignore temporarily. no need to assign actual fixes yet, just code in the UI.
