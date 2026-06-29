@@ -71,6 +71,9 @@ const FORMAT_SHORTCUTS = {
 };
 
 const DEFAULT_TABLE_DOCUMENT_ID = "default-table-document";
+const VERSION_DOCUMENT_ID_PREFIX = "version:";
+const VERSION_DOCUMENT_ID_SUFFIX = ":program";
+const DEFAULT_DOCUMENT_TITLE = "Untitled";
 const TABLE_VIEW_SPREADSHEET = "spreadsheet";
 const TABLE_VIEW_HIERARCHICAL = "hierarchical";
 const SAVE_BANNER_DURATION_MS = 2500;
@@ -299,6 +302,14 @@ export default function App() {
   const [sortConfig, setSortConfig] = useState(null);
   const [advancedSortConfig, setAdvancedSortConfig] = useState(null);
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
+  const [isVersionMenuOpen, setIsVersionMenuOpen] = useState(false);
+  const [projectVersions, setProjectVersions] = useState([]);
+  const [activeVersionId, setActiveVersionId] = useState("");
+  const [versionDialogMode, setVersionDialogMode] = useState(null);
+  const [versionDraftName, setVersionDraftName] = useState("");
+  const [versionDraftDate, setVersionDraftDate] = useState(getTodayDateInputValue);
+  const [versionDraftSourceId, setVersionDraftSourceId] = useState("");
+  const [isDeleteVersionConfirmOpen, setIsDeleteVersionConfirmOpen] = useState(false);
   const [columnMenu, setColumnMenu] = useState(null);
   const [openSpreadsheetTitlePaneId, setOpenSpreadsheetTitlePaneId] = useState(null);
   const [spreadsheetSettingsPaneId, setSpreadsheetSettingsPaneId] = useState(null);
@@ -575,6 +586,22 @@ export default function App() {
   }, [isProjectMenuOpen]);
 
   useEffect(() => {
+    if (!isVersionMenuOpen) return undefined;
+
+    const closeVersionMenu = () => setIsVersionMenuOpen(false);
+    const closeVersionMenuOnKey = (event) => {
+      if (event.key === "Escape") closeVersionMenu();
+    };
+
+    window.addEventListener("click", closeVersionMenu);
+    window.addEventListener("keydown", closeVersionMenuOnKey);
+    return () => {
+      window.removeEventListener("click", closeVersionMenu);
+      window.removeEventListener("keydown", closeVersionMenuOnKey);
+    };
+  }, [isVersionMenuOpen]);
+
+  useEffect(() => {
     const onKeyDown = (event) => {
       if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "s") return;
 
@@ -586,6 +613,7 @@ export default function App() {
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [
+    activeVersionId,
     activeDiagramView,
     activeTablePaneId,
     advancedSortConfig,
@@ -598,6 +626,7 @@ export default function App() {
     isStartDialogOpen,
     isTableOpen,
     programData,
+    projectVersions,
     sortConfig,
     spreadsheetSettings,
     stackingConflicts,
@@ -660,7 +689,15 @@ export default function App() {
 
     const onKeyDown = (event) => {
       if (event.defaultPrevented || !isTablePanelActiveForKeyboard()) return;
-      if (spreadsheetSettingsPaneId || isAdvancedSortOpen || isAdvancedCancelConfirmOpen || isExitConfirmOpen) return;
+      if (
+        spreadsheetSettingsPaneId ||
+        isAdvancedSortOpen ||
+        isAdvancedCancelConfirmOpen ||
+        isExitConfirmOpen ||
+        isVersionMenuOpen ||
+        versionDialogMode ||
+        isDeleteVersionConfirmOpen
+      ) return;
       if (spreadsheetSettings.view === TABLE_VIEW_HIERARCHICAL) return;
 
       if (editingTableCell) {
@@ -713,6 +750,7 @@ export default function App() {
   }, [
     isAdvancedCancelConfirmOpen,
     isAdvancedSortOpen,
+    isDeleteVersionConfirmOpen,
     isExitConfirmOpen,
     isTableOpen,
     spreadsheetSettings,
@@ -723,6 +761,7 @@ export default function App() {
     activeTablePaneId,
     columnMenu,
     isProjectMenuOpen,
+    isVersionMenuOpen,
     openSpreadsheetTitlePaneId,
     sortConfig,
     advancedSortConfig,
@@ -732,6 +771,7 @@ export default function App() {
     tableColumnWidths,
     tableHistory,
     tableRowHeights,
+    versionDialogMode,
     workspaceSlots,
   ]);
 
@@ -740,7 +780,14 @@ export default function App() {
 
     const onKeyDown = (event) => {
       if (event.defaultPrevented || !isDiagramPanelActiveForKeyboard()) return;
-      if (isAdvancedSortOpen || isAdvancedCancelConfirmOpen || isExitConfirmOpen) return;
+      if (
+        isAdvancedSortOpen ||
+        isAdvancedCancelConfirmOpen ||
+        isExitConfirmOpen ||
+        isVersionMenuOpen ||
+        versionDialogMode ||
+        isDeleteVersionConfirmOpen
+      ) return;
 
       if (event.key === "Escape" && !event.altKey && !event.ctrlKey && !event.metaKey) {
         if (clearActiveDiagramProgrammingSelection()) {
@@ -771,14 +818,17 @@ export default function App() {
     draftRows,
     isAdvancedCancelConfirmOpen,
     isAdvancedSortOpen,
+    isDeleteVersionConfirmOpen,
     isDiagramsOpen,
     isExitConfirmOpen,
     isTableOpen,
+    isVersionMenuOpen,
     stackingConflicts,
     tableColumnWidths,
     tableDocuments,
     tableHistory,
     tableRowHeights,
+    versionDialogMode,
     workspaceSlots,
   ]);
 
@@ -791,11 +841,16 @@ export default function App() {
 
   function applyProgramData(data) {
     const nextDocument = createTableDocumentForCurrentSpreadsheetSettings(data);
+    const defaultVersion = createProjectVersionFromDocument(DEFAULT_TABLE_DOCUMENT_ID, nextDocument, {
+      name: getDefaultProjectVersionName(0),
+    });
     setProgramData(nextDocument.programData);
     setBlankSpreadsheetCellValues({});
     setTableDocuments({
       [DEFAULT_TABLE_DOCUMENT_ID]: nextDocument,
     });
+    setProjectVersions([defaultVersion]);
+    setActiveVersionId(defaultVersion.id);
     setDraftProjectName(nextDocument.draftProjectName);
     setDraftRows(nextDocument.draftRows);
     setCellStyles(nextDocument.cellStyles);
@@ -813,7 +868,7 @@ export default function App() {
       return createTableDocumentFromData(programData);
     }
 
-    return createTableDocumentFromData(createEmptyProgramData("Untitled Project"));
+    return createTableDocumentFromData(createEmptyProgramData(DEFAULT_DOCUMENT_TITLE));
   }
 
   function getTableDocument(documentId = DEFAULT_TABLE_DOCUMENT_ID) {
@@ -962,6 +1017,8 @@ export default function App() {
 
     try {
       await loadProgramDataFileDocument(documentId);
+      const selectedVersion = getProjectVersionForDocumentId(documentId);
+      if (selectedVersion) setActiveVersionId(selectedVersion.id);
       updateTablePaneState(paneId, (state) => ({
         ...state,
         documentId,
@@ -978,6 +1035,28 @@ export default function App() {
   }
 
   function getAvailableTableDocumentOptions(currentDocumentId) {
+    if (projectVersions.length > 0) {
+      const normalizedCurrentDocumentId = String(currentDocumentId || "");
+      const orderedVersions = normalizedCurrentDocumentId
+        ? [
+            ...projectVersions.filter((version) => getProjectVersionDocumentId(version) === normalizedCurrentDocumentId),
+            ...projectVersions.filter((version) => getProjectVersionDocumentId(version) !== normalizedCurrentDocumentId),
+          ]
+        : projectVersions;
+
+      return orderedVersions.map((version) => {
+        const documentId = getProjectVersionDocumentId(version);
+        const tableDocument = tableDocuments[documentId] ?? getTableDocument(documentId);
+
+        return {
+          id: documentId,
+          label: getVersionDocumentOptionLabel(version, documentId, tableDocument),
+          rowCount: tableDocument?.draftRows?.length ?? 0,
+          source: "version",
+        };
+      });
+    }
+
     const optionsById = new Map();
     const addOption = (option) => {
       if (!isSelectableSpreadsheetOption(option) || optionsById.has(option.id)) return;
@@ -998,10 +1077,24 @@ export default function App() {
         path: file.path,
         rowCount: file.rowCount,
         source: file.source,
+        documentId: file.documentId ?? file.document_id ?? "",
+      });
+    }
+
+    for (const version of projectVersions) {
+      const documentId = getProjectVersionDocumentId(version);
+      const tableDocument = tableDocuments[documentId] ?? (documentId === DEFAULT_TABLE_DOCUMENT_ID ? getTableDocument(documentId) : null);
+      if (shouldHideBlankDefaultTableDocument(documentId, tableDocument, currentDocumentId)) continue;
+      addOption({
+        id: documentId,
+        label: version.name || getTableDocumentOptionLabel(documentId),
+        rowCount: tableDocument?.draftRows?.length ?? 0,
+        source: "version",
       });
     }
 
     for (const [documentId, tableDocument] of Object.entries(tableDocuments)) {
+      if (shouldHideBlankDefaultTableDocument(documentId, tableDocument, currentDocumentId)) continue;
       addOption({
         id: documentId,
         label: tableDocument.draftProjectName,
@@ -1013,6 +1106,7 @@ export default function App() {
     for (const slot of workspaceSlots) {
       if (getWorkspacePaneType(slot) !== "table") continue;
       const documentId = typeof slot === "string" ? DEFAULT_TABLE_DOCUMENT_ID : slot.tableState?.documentId ?? DEFAULT_TABLE_DOCUMENT_ID;
+      if (shouldHideBlankDefaultTableDocument(documentId, getTableDocument(documentId), currentDocumentId)) continue;
       addOption({
         id: documentId,
         label: getTableDocumentOptionLabel(documentId),
@@ -1025,9 +1119,27 @@ export default function App() {
   }
 
   function getTableDocumentOptionLabel(documentId) {
-    const tableDocument = tableDocuments[documentId] ?? (documentId === DEFAULT_TABLE_DOCUMENT_ID ? getTableDocument(documentId) : null);
-    const file = availableProgramDataFiles.find((programFile) => programFile.id === documentId);
-    return tableDocument?.draftProjectName || file?.label || "Untitled Project";
+    const normalizedDocumentId = String(documentId || DEFAULT_TABLE_DOCUMENT_ID);
+    const tableDocument = tableDocuments[normalizedDocumentId] ?? (normalizedDocumentId === DEFAULT_TABLE_DOCUMENT_ID ? getTableDocument(normalizedDocumentId) : null);
+    const file = getProgramDataFileForDocumentId(normalizedDocumentId);
+    return getTableDocumentTitle(normalizedDocumentId, tableDocument, file);
+  }
+
+  function getTableDocumentTitle(documentId, tableDocument = null, file = null) {
+    const normalizedDocumentId = String(documentId || DEFAULT_TABLE_DOCUMENT_ID);
+    const documentForTitle = tableDocument ?? tableDocuments[normalizedDocumentId] ?? (normalizedDocumentId === DEFAULT_TABLE_DOCUMENT_ID ? getTableDocument(normalizedDocumentId) : null);
+    const fileForTitle = file ?? getProgramDataFileForDocumentId(normalizedDocumentId);
+    return documentForTitle?.draftProjectName || fileForTitle?.label || DEFAULT_DOCUMENT_TITLE;
+  }
+
+  function getVersionDocumentOptionLabel(version, documentId, tableDocument = null) {
+    const versionLabel = version?.name || getDefaultProjectVersionName(0);
+    return `V. ${versionLabel} / ${getTableDocumentTitle(documentId, tableDocument)}`;
+  }
+
+  function getProgramDataFileForDocumentId(documentId) {
+    const normalizedDocumentId = String(documentId || DEFAULT_TABLE_DOCUMENT_ID);
+    return availableProgramDataFiles.find((programFile) => programFile.id === normalizedDocumentId) ?? null;
   }
 
   function hasTableDocumentUnsavedEdits(documentId = DEFAULT_TABLE_DOCUMENT_ID) {
@@ -1035,14 +1147,342 @@ export default function App() {
     return Boolean(tableDocument?.programData && tableDocument.isDirty);
   }
 
+  function createVersionDocumentId(versionId) {
+    return `${VERSION_DOCUMENT_ID_PREFIX}${versionId}${VERSION_DOCUMENT_ID_SUFFIX}`;
+  }
+
+  function getProjectVersionDocumentId(version) {
+    const documentId = String(version?.documentId ?? "").trim();
+    return documentId || (version?.id ? createVersionDocumentId(version.id) : DEFAULT_TABLE_DOCUMENT_ID);
+  }
+
+  function getActiveProjectVersion() {
+    return projectVersions.find((version) => version.id === activeVersionId) ?? projectVersions[0] ?? null;
+  }
+
+  function getActiveVersionDocumentId() {
+    return getProjectVersionDocumentId(getActiveProjectVersion()) || DEFAULT_TABLE_DOCUMENT_ID;
+  }
+
+  function getProjectVersionForDocumentId(documentId) {
+    const normalizedDocumentId = String(documentId || DEFAULT_TABLE_DOCUMENT_ID);
+    return projectVersions.find((version) => getProjectVersionDocumentId(version) === normalizedDocumentId) ?? null;
+  }
+
+  function getLinkedProjectVersionForDocumentId(documentId) {
+    const normalizedDocumentId = String(documentId || DEFAULT_TABLE_DOCUMENT_ID);
+    const directVersion = getProjectVersionForDocumentId(normalizedDocumentId);
+    if (directVersion) return directVersion;
+
+    const file = getProgramDataFileForDocumentId(normalizedDocumentId);
+    const linkedDocumentId = String(file?.documentId ?? file?.document_id ?? "").trim();
+    if (linkedDocumentId) {
+      const linkedVersion = getProjectVersionForDocumentId(linkedDocumentId);
+      if (linkedVersion) return linkedVersion;
+    }
+
+    const tableDocument = tableDocuments[normalizedDocumentId];
+    if (!tableDocument?.programData) return null;
+
+    return getProjectVersionForProgramData(tableDocument.programData);
+  }
+
+  function getProjectVersionForProgramData(sourceProgramData) {
+    if (!isPlainObject(sourceProgramData)) return null;
+
+    const candidates = projectVersions
+      .map((version) => {
+        const documentId = getProjectVersionDocumentId(version);
+        const tableDocument = tableDocuments[documentId];
+        return {
+          version,
+          tableDocument,
+          matches: doProgramDataSourcesMatch(sourceProgramData, tableDocument?.programData),
+        };
+      })
+      .filter((candidate) => candidate.matches);
+
+    if (candidates.length <= 1) return candidates[0]?.version ?? null;
+
+    const sourceTitle = normalizeProjectName(getProgramTitle(sourceProgramData));
+    const titleMatch = candidates.find(({ version, tableDocument }) => (
+      normalizeProjectName(version.name) === sourceTitle ||
+      normalizeProjectName(tableDocument?.draftProjectName) === sourceTitle ||
+      normalizeProjectName(getProgramTitle(tableDocument?.programData)) === sourceTitle
+    ));
+
+    return titleMatch?.version ?? candidates[0]?.version ?? null;
+  }
+
+  function getVersionLabelForDocumentId(documentId) {
+    const version = getLinkedProjectVersionForDocumentId(documentId);
+    return version?.name || getTableDocumentOptionLabel(documentId);
+  }
+
+  function getActiveVersionLabel() {
+    return getActiveProjectVersion()?.name || "Untitled Version";
+  }
+
+  function getDefaultProjectVersionName(index = 0) {
+    return `Version ${index + 1}`;
+  }
+
+  function createUniqueProjectVersionId(name, usedIds = new Set(projectVersions.map((version) => version.id))) {
+    const slug = slugify(name || "version");
+    const base = slug.startsWith("version-") ? slug : `version-${slug}`;
+    let candidate = base;
+    let suffix = 2;
+
+    while (usedIds.has(candidate)) {
+      candidate = `${base}-${suffix}`;
+      suffix += 1;
+    }
+
+    usedIds.add(candidate);
+    return candidate;
+  }
+
+  function createProjectVersionFromDocument(documentId, tableDocument, overrides = {}) {
+    const programDataForVersion = tableDocument?.programData;
+    const usedIds = overrides.usedIds instanceof Set ? overrides.usedIds : undefined;
+    const defaultVersionIndex = usedIds instanceof Set ? usedIds.size : projectVersions.length;
+    const name = normalizeProjectName(overrides.name) || getDefaultProjectVersionName(defaultVersionIndex);
+    const id = overrides.id
+      ? createUniqueProjectVersionId(overrides.id.replace(/^version-/, ""), usedIds)
+      : createUniqueProjectVersionId(name, usedIds);
+    const projectCreatedAt = programDataForVersion?.project?.created_at;
+    const projectUpdatedAt = programDataForVersion?.project?.updated_at;
+
+    return {
+      id,
+      name,
+      date: normalizeDateInputValue(overrides.date) || getDateInputValue(projectUpdatedAt || projectCreatedAt) || getTodayDateInputValue(),
+      documentId: documentId || DEFAULT_TABLE_DOCUMENT_ID,
+      createdAt: overrides.createdAt || projectCreatedAt || new Date().toISOString(),
+      updatedAt: overrides.updatedAt || projectUpdatedAt || new Date().toISOString(),
+      diagramState: normalizeWorkspaceDiagramState(overrides.diagramState ?? createDefaultDiagramState()),
+    };
+  }
+
+  function restoreProjectVersionsFromWorkspaceState(workspaceState, restoredDocuments, fallbackProgramData) {
+    const storedVersions = Array.isArray(workspaceState?.projectVersions) ? workspaceState.projectVersions : [];
+    const usedIds = new Set();
+    const restoredVersions = storedVersions
+      .map((version, index) => restoreProjectVersion(version, index, usedIds, restoredDocuments, fallbackProgramData))
+      .filter(Boolean);
+    const hasUsefulDocuments = Object.values(restoredDocuments).some(hasTableDocumentProgramRows);
+    const versions = restoredVersions.filter((version) => {
+      const documentId = getProjectVersionDocumentId(version);
+      const tableDocument = restoredDocuments[documentId];
+      if (!tableDocument) return false;
+      return !(hasUsefulDocuments && isBlankDefaultTableDocument(documentId, tableDocument));
+    });
+
+    if (versions.length > 0) return versions;
+
+    usedIds.clear();
+    const fallbackDocumentId = getFallbackProjectVersionDocumentId(workspaceState, restoredDocuments);
+    const fallbackDocument = restoredDocuments[fallbackDocumentId] ?? createTableDocumentFromData(fallbackProgramData);
+    restoredDocuments[fallbackDocumentId] = fallbackDocument;
+
+    return [createProjectVersionFromDocument(fallbackDocumentId, fallbackDocument, {
+      usedIds,
+      name: getDefaultProjectVersionName(0),
+    })];
+  }
+
+  function restoreProjectVersion(version, index, usedIds, restoredDocuments, fallbackProgramData) {
+    if (!isPlainObject(version)) return null;
+
+    const rawVersionName = normalizeProjectName(version.name || version.label) || getDefaultProjectVersionName(index);
+    const id = version.id
+      ? createUniqueProjectVersionId(version.id.replace(/^version-/, ""), usedIds)
+      : createUniqueProjectVersionId(rawVersionName, usedIds);
+    const documentId = String(version.documentId || version.document_id || "").trim() || createVersionDocumentId(id);
+    const tableDocument = restoredDocuments[documentId] ?? createTableDocumentFromData(fallbackProgramData);
+    restoredDocuments[documentId] = tableDocument;
+    const versionName = getRestoredProjectVersionName(version.name || version.label, index, tableDocument);
+
+    return {
+      id,
+      name: versionName,
+      date: normalizeDateInputValue(version.date) || getDateInputValue(version.updatedAt || version.updated_at) || getTodayDateInputValue(),
+      documentId,
+      createdAt: version.createdAt || version.created_at || tableDocument.programData?.project?.created_at || new Date().toISOString(),
+      updatedAt: version.updatedAt || version.updated_at || tableDocument.programData?.project?.updated_at || new Date().toISOString(),
+      diagramState: normalizeWorkspaceDiagramState(version.diagramState || version.diagram_state || createDefaultDiagramState()),
+    };
+  }
+
+  function getRestoredProjectVersionName(name, index, tableDocument) {
+    const normalizedName = normalizeProjectName(name);
+    const documentName = normalizeProjectName(tableDocument?.draftProjectName || getProgramTitle(tableDocument?.programData));
+    const isLegacyDocumentTitle = Boolean(documentName && normalizedName === documentName);
+    const isLegacyUntitledName = normalizedName === "Untitled Project" || normalizedName === DEFAULT_DOCUMENT_TITLE;
+
+    if (!normalizedName || (index === 0 && (isLegacyDocumentTitle || isLegacyUntitledName))) {
+      return getDefaultProjectVersionName(index);
+    }
+
+    return normalizedName;
+  }
+
+  function getFallbackProjectVersionDocumentId(workspaceState, restoredDocuments) {
+    const workspaceDocumentIds = getWorkspaceReferencedDocumentIds(workspaceState?.workspaceSlots, workspaceState?.activeTablePaneId);
+    for (const documentId of workspaceDocumentIds) {
+      if (hasTableDocumentProgramRows(restoredDocuments[documentId])) return documentId;
+    }
+
+    const usefulDocumentId = Object.entries(restoredDocuments)
+      .find(([, tableDocument]) => hasTableDocumentProgramRows(tableDocument))?.[0];
+    if (usefulDocumentId) return usefulDocumentId;
+
+    return restoredDocuments[DEFAULT_TABLE_DOCUMENT_ID]
+      ? DEFAULT_TABLE_DOCUMENT_ID
+      : Object.keys(restoredDocuments)[0] || DEFAULT_TABLE_DOCUMENT_ID;
+  }
+
+  function getWorkspaceReferencedDocumentIds(storedSlots, activeTablePaneId = "") {
+    if (!Array.isArray(storedSlots)) return [];
+
+    const documentIds = [];
+    const addDocumentId = (documentId) => {
+      const normalizedDocumentId = String(documentId || "").trim();
+      if (normalizedDocumentId && !documentIds.includes(normalizedDocumentId)) {
+        documentIds.push(normalizedDocumentId);
+      }
+    };
+
+    const activeSlot = activeTablePaneId
+      ? storedSlots.find((slot) => slot?.id === activeTablePaneId)
+      : null;
+    if ((typeof activeSlot === "string" ? activeSlot : activeSlot?.type) === "table") {
+      addDocumentId(activeSlot?.tableState?.documentId);
+    }
+
+    for (const slot of storedSlots) {
+      const type = typeof slot === "string" ? slot : slot?.type;
+      if (type === "table") addDocumentId(slot?.tableState?.documentId);
+      if (type === "diagrams") addDocumentId(slot?.diagramState?.sourceDocumentId);
+    }
+
+    return documentIds;
+  }
+
+  function hasTableDocumentProgramRows(tableDocument) {
+    const draftRowCount = Array.isArray(tableDocument?.draftRows) ? tableDocument.draftRows.length : 0;
+    const programRowCount = Array.isArray(tableDocument?.programData?.program_items) ? tableDocument.programData.program_items.length : 0;
+    return draftRowCount > 0 || programRowCount > 0;
+  }
+
+  function isBlankDefaultTableDocument(documentId, tableDocument) {
+    if (documentId !== DEFAULT_TABLE_DOCUMENT_ID) return false;
+    if (hasTableDocumentProgramRows(tableDocument)) return false;
+
+    const title = normalizeProjectName(tableDocument?.draftProjectName || getProgramTitle(tableDocument?.programData));
+    return !title || title === DEFAULT_DOCUMENT_TITLE || title === "Untitled Project";
+  }
+
+  function hasUsefulNonDefaultTableDocument(documents = tableDocuments) {
+    return Object.entries(documents).some(([documentId, tableDocument]) => (
+      documentId !== DEFAULT_TABLE_DOCUMENT_ID && hasTableDocumentProgramRows(tableDocument)
+    ));
+  }
+
+  function shouldHideBlankDefaultTableDocument(documentId, tableDocument, currentDocumentId = "") {
+    return (
+      documentId === DEFAULT_TABLE_DOCUMENT_ID &&
+      documentId !== currentDocumentId &&
+      hasUsefulNonDefaultTableDocument() &&
+      isBlankDefaultTableDocument(documentId, tableDocument)
+    );
+  }
+
+  function shouldOmitBlankDefaultTableDocumentFromSnapshot(documentId, tableDocument) {
+    if (!hasUsefulNonDefaultTableDocument()) return false;
+    if (!isBlankDefaultTableDocument(documentId, tableDocument)) return false;
+
+    const referencedDocumentIds = new Set(getWorkspaceReferencedDocumentIds(workspaceSlots, activeTablePaneId));
+    return !referencedDocumentIds.has(DEFAULT_TABLE_DOCUMENT_ID);
+  }
+
+  function getRestoredActiveVersionId(workspaceState, versions) {
+    const requestedVersionId = String(workspaceState?.activeVersionId || workspaceState?.active_version_id || "").trim();
+    if (versions.some((version) => version.id === requestedVersionId)) return requestedVersionId;
+    return versions[0]?.id || "";
+  }
+
+  function getCurrentDiagramStateForVersion(version) {
+    const documentId = getProjectVersionDocumentId(version);
+    const matchingPane = [...workspaceSlots]
+      .reverse()
+      .find((slot) => (
+        typeof slot !== "string" &&
+        getWorkspacePaneType(slot) === "diagrams" &&
+        (slot.diagramState?.sourceDocumentId || "") === documentId
+      ));
+
+    return normalizeWorkspaceDiagramState(matchingPane?.diagramState || version?.diagramState || createDefaultDiagramState());
+  }
+
+  function getProjectVersionDiagramStateForDocument(documentId) {
+    const version = getProjectVersionForDocumentId(documentId);
+    return normalizeWorkspaceDiagramState(version?.diagramState ?? createDefaultDiagramState());
+  }
+
+  function updateProjectVersionDiagramStateForDocument(documentId, diagramState) {
+    const versionForDocument = getProjectVersionForDocumentId(documentId);
+    if (!versionForDocument) return;
+
+    const nextDiagramState = normalizeWorkspaceDiagramState({
+      ...diagramState,
+      sourceDocumentId: getProjectVersionDocumentId(versionForDocument),
+    });
+
+    setProjectVersions((versions) =>
+      versions.map((version) =>
+        version.id === versionForDocument.id
+          ? {
+              ...version,
+              diagramState: nextDiagramState,
+            }
+          : version,
+      ),
+    );
+  }
+
+  function createSerializableProjectVersions() {
+    return projectVersions.map((version) => {
+      const documentId = getProjectVersionDocumentId(version);
+      const tableDocument = tableDocuments[documentId];
+      if (shouldOmitBlankDefaultTableDocumentFromSnapshot(documentId, tableDocument)) return null;
+      const updatedAt = tableDocument?.programData?.project?.updated_at || version.updatedAt || new Date().toISOString();
+
+      return {
+        id: version.id,
+        name: version.name || "Untitled Version",
+        date: normalizeDateInputValue(version.date) || getDateInputValue(updatedAt) || getTodayDateInputValue(),
+        documentId,
+        createdAt: version.createdAt || tableDocument?.programData?.project?.created_at || updatedAt,
+        updatedAt,
+        diagramState: getCurrentDiagramStateForVersion(version),
+      };
+    }).filter(Boolean);
+  }
+
   function applyProjectSnapshot(snapshot) {
     const workspaceState = snapshot.workspaceState ?? {};
     const restoredTableDocuments = restoreTableDocumentsFromWorkspaceState(workspaceState, snapshot.programData);
+    const restoredProjectVersions = restoreProjectVersionsFromWorkspaceState(workspaceState, restoredTableDocuments, snapshot.programData);
+    const restoredActiveVersionId = getRestoredActiveVersionId(workspaceState, restoredProjectVersions);
+    const restoredActiveVersion = restoredProjectVersions.find((version) => version.id === restoredActiveVersionId) ?? restoredProjectVersions[0];
+    const restoredActiveDocumentId = getProjectVersionDocumentId(restoredActiveVersion);
     const restoredSavedStackingConflicts = restoreStackingConflictsFromWorkspaceState(workspaceState, restoredTableDocuments);
     const restoredStackingConflicts = Object.entries(restoredTableDocuments).flatMap(([documentId, tableDocument]) =>
       deriveStackingConflictsForDocument(documentId, tableDocument, restoredSavedStackingConflicts),
     );
     const defaultDocument = restoredTableDocuments[DEFAULT_TABLE_DOCUMENT_ID] ?? createTableDocumentFromData(snapshot.programData);
+    const activeDocument = restoredTableDocuments[restoredActiveDocumentId] ?? defaultDocument;
     const programTableState = snapshot.tableState?.program ?? {};
     const restoredWorkspaceSlots = validateWorkspaceSlotsBlockingSettings(
       restoreWorkspaceSlots(workspaceState.workspaceSlots),
@@ -1054,12 +1494,14 @@ export default function App() {
       : null;
     const firstDiagramState = restoredWorkspaceSlots.find((slot) => getWorkspacePaneType(slot) === "diagrams")?.diagramState;
 
-    setProgramData(snapshot.programData);
+    setProgramData(activeDocument.programData ?? snapshot.programData);
     setBlankSpreadsheetCellValues(isPlainObject(workspaceState.blankSpreadsheetCellValues) ? workspaceState.blankSpreadsheetCellValues : {});
     setTableDocuments(restoredTableDocuments);
-    setDraftProjectName(defaultDocument.draftProjectName);
-    setDraftRows(defaultDocument.draftRows);
-    setCellStyles(defaultDocument.cellStyles);
+    setProjectVersions(restoredProjectVersions);
+    setActiveVersionId(restoredActiveVersionId);
+    setDraftProjectName(activeDocument.draftProjectName);
+    setDraftRows(activeDocument.draftRows);
+    setCellStyles(activeDocument.cellStyles);
     setTableHistory(createEmptyTableHistory());
     setStackingConflicts(restoredStackingConflicts);
     setActiveConflictCellKey(null);
@@ -1087,6 +1529,9 @@ export default function App() {
     setIsToolMenuOpen(false);
     setSideToolMenu(null);
     setIsProjectMenuOpen(false);
+    setIsVersionMenuOpen(false);
+    setVersionDialogMode(null);
+    setIsDeleteVersionConfirmOpen(false);
     setColumnMenu(null);
     setOpenSpreadsheetTitlePaneId(null);
     setSpreadsheetSettingsPaneId(null);
@@ -1100,7 +1545,7 @@ export default function App() {
   }
 
   async function handleCreateNewProject() {
-    const data = createEmptyProgramData("Untitled Project");
+    const data = createEmptyProgramData(DEFAULT_DOCUMENT_TITLE);
     applyProjectSnapshot({
       programData: data,
       tableState: createDefaultProjectTableState(),
@@ -1155,6 +1600,7 @@ export default function App() {
 
   function openProjectImportPicker() {
     setIsProjectMenuOpen(false);
+    setIsVersionMenuOpen(false);
     projectImportInputRef.current?.click();
   }
 
@@ -1174,7 +1620,7 @@ export default function App() {
 
   async function importSpreadsheetFile(file) {
     const targetPaneId = pendingSpreadsheetImportPaneIdRef.current;
-    const importedDocumentId = targetPaneId ? createImportedTableDocumentId(file) : DEFAULT_TABLE_DOCUMENT_ID;
+    const importedDocumentId = getSpreadsheetImportDocumentId(targetPaneId, file);
 
     setIsImporting(true);
     setActiveSpreadsheetImportPaneId(targetPaneId);
@@ -1197,6 +1643,11 @@ export default function App() {
       const data = await parseJsonResponse(response, "imported spreadsheet");
       if (targetPaneId) {
         setTableDocumentFromData(importedDocumentId, data);
+        const importedVersion = getProjectVersionForDocumentId(importedDocumentId);
+        if (importedVersion) {
+          setActiveVersionId(importedVersion.id);
+          touchProjectVersionForDocument(importedDocumentId, data);
+        }
         updateTablePaneState(targetPaneId, (state) => ({
           ...state,
           documentId: importedDocumentId,
@@ -1296,7 +1747,9 @@ export default function App() {
     const serializableWorkspaceSlots = workspaceSlots.map((slot, index) => createSerializableWorkspaceSlot(slot, index));
 
     return {
-      version: 1,
+      version: 2,
+      activeVersionId,
+      projectVersions: createSerializableProjectVersions(),
       workspaceSlots: serializableWorkspaceSlots,
       workspacePaneWidths: getPaneWidthsForCount(serializableWorkspaceSlots.length),
       tableDocuments: createSerializableTableDocuments(currentProgramData),
@@ -1352,6 +1805,9 @@ export default function App() {
     return {
       id,
       type,
+      versionId: type === "table"
+        ? getProjectVersionForDocumentId(normalizeWorkspaceTableState(typeof slot === "string" ? createDefaultTablePaneState() : slot.tableState).documentId)?.id ?? ""
+        : getProjectVersionForDocumentId(normalizeWorkspaceDiagramState(typeof slot === "string" ? createDefaultDiagramState() : slot.diagramState).sourceDocumentId)?.id ?? "",
       tableState: normalizeWorkspaceTableState(typeof slot === "string" ? createDefaultTablePaneState() : slot.tableState),
       diagramState: normalizeWorkspaceDiagramState(typeof slot === "string" ? createDefaultDiagramState() : slot.diagramState),
     };
@@ -1361,10 +1817,11 @@ export default function App() {
     const documents = {};
 
     for (const [documentId, tableDocument] of Object.entries(tableDocuments)) {
+      if (shouldOmitBlankDefaultTableDocumentFromSnapshot(documentId, tableDocument)) continue;
       documents[documentId] = normalizeTableDocumentForSnapshot(documentId, tableDocument, currentProgramData);
     }
 
-    if (!documents[DEFAULT_TABLE_DOCUMENT_ID]) {
+    if (projectVersions.length === 0 && !documents[DEFAULT_TABLE_DOCUMENT_ID]) {
       documents[DEFAULT_TABLE_DOCUMENT_ID] = createTableDocumentFromData(currentProgramData);
     }
 
@@ -1375,7 +1832,7 @@ export default function App() {
     const fallbackProgramData =
       documentId === DEFAULT_TABLE_DOCUMENT_ID
         ? currentProgramData
-        : tableDocument?.programData ?? createEmptyProgramData(tableDocument?.draftProjectName || "Untitled Project");
+        : tableDocument?.programData ?? createEmptyProgramData(tableDocument?.draftProjectName || DEFAULT_DOCUMENT_TITLE);
     const baseDocument = createTableDocumentFromData(fallbackProgramData);
     const draftRowsForSnapshot = Array.isArray(tableDocument?.draftRows) ? tableDocument.draftRows : baseDocument.draftRows;
     const cellStylesForSnapshot = isPlainObject(tableDocument?.cellStyles) ? tableDocument.cellStyles : baseDocument.cellStyles;
@@ -1408,13 +1865,23 @@ export default function App() {
   function restoreTableDocumentsFromWorkspaceState(workspaceState, fallbackProgramData) {
     const restoredDocuments = {};
     const storedDocuments = isPlainObject(workspaceState?.tableDocuments) ? workspaceState.tableDocuments : {};
+    const hasStoredProjectVersions = Array.isArray(workspaceState?.projectVersions) && workspaceState.projectVersions.length > 0;
 
     for (const [documentId, tableDocument] of Object.entries(storedDocuments)) {
       if (!documentId || !isPlainObject(tableDocument)) continue;
       restoredDocuments[documentId] = restoreTableDocument(tableDocument, fallbackProgramData);
     }
 
-    if (!restoredDocuments[DEFAULT_TABLE_DOCUMENT_ID]) {
+    const referencedDocumentIds = new Set(getWorkspaceReferencedDocumentIds(workspaceState?.workspaceSlots, workspaceState?.activeTablePaneId));
+    if (
+      hasUsefulNonDefaultTableDocument(restoredDocuments) &&
+      !referencedDocumentIds.has(DEFAULT_TABLE_DOCUMENT_ID) &&
+      isBlankDefaultTableDocument(DEFAULT_TABLE_DOCUMENT_ID, restoredDocuments[DEFAULT_TABLE_DOCUMENT_ID])
+    ) {
+      delete restoredDocuments[DEFAULT_TABLE_DOCUMENT_ID];
+    }
+
+    if (!restoredDocuments[DEFAULT_TABLE_DOCUMENT_ID] && !hasStoredProjectVersions) {
       restoredDocuments[DEFAULT_TABLE_DOCUMENT_ID] = createTableDocumentFromData(fallbackProgramData);
     }
 
@@ -1601,7 +2068,8 @@ export default function App() {
   }
 
   function getCurrentProgramData() {
-    const defaultDocument = tableDocuments[DEFAULT_TABLE_DOCUMENT_ID];
+    const activeDocumentId = getActiveVersionDocumentId();
+    const defaultDocument = tableDocuments[activeDocumentId] ?? tableDocuments[DEFAULT_TABLE_DOCUMENT_ID];
 
     if (defaultDocument?.programData) {
       return isTableOpen
@@ -1618,7 +2086,7 @@ export default function App() {
     }
 
     if (!programData) {
-      return createEmptyProgramData(normalizeProjectName(draftProjectName) || "Untitled Project");
+      return createEmptyProgramData(normalizeProjectName(draftProjectName) || DEFAULT_DOCUMENT_TITLE);
     }
 
     return isTableOpen
@@ -1652,6 +2120,19 @@ export default function App() {
     } finally {
       setIsProjectSaving(false);
     }
+  }
+
+  function getSpreadsheetImportDocumentId(targetPaneId, file) {
+    if (!targetPaneId) return DEFAULT_TABLE_DOCUMENT_ID;
+
+    const paneDocumentId = getTablePaneDocumentId(targetPaneId);
+    const paneVersion = getLinkedProjectVersionForDocumentId(paneDocumentId);
+    if (paneVersion) return getProjectVersionDocumentId(paneVersion);
+
+    const activeVersionDocumentId = getActiveVersionDocumentId();
+    if (projectVersions.length > 0 && activeVersionDocumentId) return activeVersionDocumentId;
+
+    return createImportedTableDocumentId(file);
   }
 
   function showSavedBanner() {
@@ -1697,8 +2178,325 @@ export default function App() {
     }
   }
 
+  function toggleVersionMenu(event) {
+    event.stopPropagation();
+    setIsProjectMenuOpen(false);
+    setIsVersionMenuOpen((isOpen) => !isOpen);
+  }
+
+  function openNewVersionDialog() {
+    setIsVersionMenuOpen(false);
+    setVersionDialogMode("new");
+    setVersionDraftName(`Version ${projectVersions.length + 1}`);
+    setVersionDraftDate(getTodayDateInputValue());
+    setVersionDraftSourceId("");
+    setErrorMessage("");
+  }
+
+  function openDuplicateVersionDialog() {
+    setIsVersionMenuOpen(false);
+    setVersionDialogMode("duplicate");
+    setVersionDraftName(`Version ${projectVersions.length + 1}`);
+    setVersionDraftDate(getTodayDateInputValue());
+    setVersionDraftSourceId(activeVersionId || projectVersions[0]?.id || "");
+    setErrorMessage("");
+  }
+
+  function requestDeleteVersion() {
+    setIsVersionMenuOpen(false);
+    setIsDeleteVersionConfirmOpen(true);
+    setErrorMessage("");
+  }
+
+  function closeVersionDialog() {
+    setVersionDialogMode(null);
+    setVersionDraftName("");
+    setVersionDraftDate(getTodayDateInputValue());
+    setVersionDraftSourceId("");
+  }
+
+  function handleVersionDialogSubmit(event) {
+    event.preventDefault();
+    if (versionDialogMode === "duplicate") {
+      duplicateProjectVersionFromDraft();
+    } else {
+      createNewProjectVersionFromDraft();
+    }
+  }
+
+  function createNewProjectVersionFromDraft() {
+    const name = normalizeProjectName(versionDraftName) || `Version ${projectVersions.length + 1}`;
+    const usedIds = new Set(projectVersions.map((version) => version.id));
+    const id = createUniqueProjectVersionId(name, usedIds);
+    const documentId = createVersionDocumentId(id);
+    const createdAt = getIsoStringForDateInput(versionDraftDate) || new Date().toISOString();
+    const documentTitle = DEFAULT_DOCUMENT_TITLE;
+    const programDataForVersion = createEmptyProgramData(documentTitle);
+    programDataForVersion.project = {
+      ...(programDataForVersion.project ?? {}),
+      id: slugify(documentTitle),
+      name: documentTitle,
+      created_at: createdAt,
+      updated_at: createdAt,
+    };
+    const tableDocument = createTableDocumentForCurrentSpreadsheetSettings(programDataForVersion);
+    const version = {
+      id,
+      name,
+      date: normalizeDateInputValue(versionDraftDate) || getTodayDateInputValue(),
+      documentId,
+      createdAt,
+      updatedAt: createdAt,
+      diagramState: createDefaultDiagramState(),
+    };
+
+    setTableDocuments((documents) => ({
+      ...documents,
+      [documentId]: tableDocument,
+    }));
+    setProjectVersions((versions) => [...versions, version]);
+    closeVersionDialog();
+    setStatusMessage(`Created ${name}.`);
+  }
+
+  function duplicateProjectVersionFromDraft() {
+    const sourceVersion = projectVersions.find((version) => version.id === versionDraftSourceId) ?? getActiveProjectVersion();
+    if (!sourceVersion) return;
+
+    const sourceDocumentId = getProjectVersionDocumentId(sourceVersion);
+    const sourceDocument = getTableDocument(sourceDocumentId);
+    const name = normalizeProjectName(versionDraftName) || `${sourceVersion.name || "Version"} Copy`;
+    const usedIds = new Set(projectVersions.map((version) => version.id));
+    const id = createUniqueProjectVersionId(name, usedIds);
+    const documentId = createVersionDocumentId(id);
+    const createdAt = getIsoStringForDateInput(versionDraftDate) || new Date().toISOString();
+    const sourceProgramData = mergeRowsIntoProgramData(
+      sourceDocument.programData,
+      sourceDocument.draftRows,
+      sourceDocument.cellStyles,
+      sourceDocument.draftProjectName,
+      {
+        distributeIdenticalRooms: spreadsheetSettings.distributeIdenticalRooms,
+      },
+    );
+    const programDataForVersion = cloneJsonValue(sourceProgramData);
+    programDataForVersion.project = {
+      ...(programDataForVersion.project ?? {}),
+      id: slugify(name),
+      name,
+      created_at: createdAt,
+      updated_at: createdAt,
+    };
+    const tableDocument = createTableDocumentForCurrentSpreadsheetSettings(programDataForVersion);
+    const sourceDiagramState = getCurrentDiagramStateForVersion(sourceVersion);
+    const copiedDiagramState = normalizeWorkspaceDiagramState({
+      ...cloneJsonValue(sourceDiagramState),
+      sourceDocumentId: documentId,
+      stackingDiagram: buildStackingDiagramForSource(
+        programDataForVersion,
+        sourceDiagramState.stackingSettings ?? createDefaultStackingSettings(),
+      ),
+    });
+    const version = {
+      id,
+      name,
+      date: normalizeDateInputValue(versionDraftDate) || getTodayDateInputValue(),
+      documentId,
+      createdAt,
+      updatedAt: createdAt,
+      diagramState: copiedDiagramState,
+    };
+
+    setTableDocuments((documents) => ({
+      ...documents,
+      [documentId]: tableDocument,
+    }));
+    setProjectVersions((versions) => [...versions, version]);
+    activateProjectVersion(version, tableDocument);
+    retargetWorkspaceSlotsToVersion(documentId, (currentState) => ({
+      ...cloneJsonValue(copiedDiagramState),
+      activeView: normalizeDiagramView(currentState.activeView),
+      sourceDocumentId: documentId,
+    }), { fromDocumentId: sourceDocumentId });
+    closeVersionDialog();
+    setStatusMessage(`Duplicated ${sourceVersion.name || "version"} as ${name}.`);
+  }
+
+  function activateProjectVersion(version, tableDocument) {
+    setActiveVersionId(version.id);
+    setProgramData(tableDocument.programData);
+    setDraftProjectName(tableDocument.draftProjectName);
+    setDraftRows(tableDocument.draftRows);
+    setCellStyles(tableDocument.cellStyles);
+    setTableHistory(createEmptyTableHistory());
+    setActiveConflictCellKey(null);
+    setConflictMenu(null);
+    setFooterConflictMenuPaneId(null);
+    clearTableSelection();
+  }
+
+  function retargetWorkspaceSlotsToVersion(documentId, createDiagramState, options = {}) {
+    const fromDocumentId = String(options.fromDocumentId || DEFAULT_TABLE_DOCUMENT_ID);
+    const currentSlots = workspaceSlots.length > 0 ? workspaceSlots : getCurrentWorkspaceSlots();
+    const nextSlots = currentSlots.map((slot, index) => {
+      const type = getWorkspacePaneType(slot);
+      const pane = typeof slot === "string"
+        ? {
+            id: getWorkspacePaneId(slot, index),
+            type,
+            tableState: createDefaultTablePaneState(),
+            diagramState: createDefaultDiagramState(),
+          }
+        : slot;
+
+      if (type === "table") {
+        const tableState = normalizeWorkspaceTableState(pane.tableState);
+        if (tableState.documentId !== fromDocumentId) return pane;
+
+        return {
+          ...pane,
+          tableState: {
+            ...tableState,
+            documentId,
+            sortConfig: null,
+            advancedSortConfig: null,
+            selectedCells: [],
+            selectionRanges: [],
+            selectionAnchor: null,
+          },
+        };
+      }
+
+      if (type === "diagrams") {
+        const currentState = normalizeWorkspaceDiagramState(pane.diagramState);
+        const sourceDocumentId = currentState.sourceDocumentId || "";
+        if (sourceDocumentId && sourceDocumentId !== fromDocumentId) return pane;
+
+        return {
+          ...pane,
+          diagramState: createDiagramState(currentState),
+        };
+      }
+
+      return pane;
+    });
+
+    setWorkspaceSlots(nextSlots);
+    setWorkspacePaneWidths((widths) => (
+      widths.length === nextSlots.length ? widths : createEqualPaneWidths(nextSlots.length)
+    ));
+    syncWorkspaceToolFlags(nextSlots);
+  }
+
+  function deleteActiveProjectVersion() {
+    const targetVersion = getActiveProjectVersion();
+    if (!targetVersion || projectVersions.length <= 1) {
+      setIsDeleteVersionConfirmOpen(false);
+      return;
+    }
+
+    const targetDocumentId = getProjectVersionDocumentId(targetVersion);
+    const remainingVersions = projectVersions.filter((version) => version.id !== targetVersion.id);
+    const nextVersion = remainingVersions[0];
+    const nextDocumentId = getProjectVersionDocumentId(nextVersion);
+    const nextDocument = tableDocuments[nextDocumentId] ?? createTableDocumentFromData(createEmptyProgramData(DEFAULT_DOCUMENT_TITLE));
+
+    setProjectVersions(remainingVersions);
+    setActiveVersionId(nextVersion.id);
+    setTableDocuments((documents) => {
+      const nextDocuments = { ...documents };
+      delete nextDocuments[targetDocumentId];
+      if (!nextDocuments[nextDocumentId]) nextDocuments[nextDocumentId] = nextDocument;
+      return nextDocuments;
+    });
+    setBlankSpreadsheetCellValues((values) => {
+      const nextValues = { ...values };
+      delete nextValues[targetDocumentId];
+      return nextValues;
+    });
+    setStackingConflicts((conflicts) =>
+      conflicts.filter((conflict) => (conflict.documentId || DEFAULT_TABLE_DOCUMENT_ID) !== targetDocumentId),
+    );
+    setProgramData(nextDocument.programData);
+    setDraftProjectName(nextDocument.draftProjectName);
+    setDraftRows(nextDocument.draftRows);
+    setCellStyles(nextDocument.cellStyles);
+    setTableHistory(createEmptyTableHistory());
+    retargetDeletedVersionPanes(targetDocumentId, nextDocumentId);
+    setIsDeleteVersionConfirmOpen(false);
+    setStatusMessage(`Deleted ${targetVersion.name || "version"}.`);
+  }
+
+  function retargetDeletedVersionPanes(deletedDocumentId, fallbackDocumentId) {
+    const currentSlots = workspaceSlots.length > 0 ? workspaceSlots : getCurrentWorkspaceSlots();
+    const nextSlots = currentSlots.map((slot, index) => {
+      const type = getWorkspacePaneType(slot);
+      const pane = typeof slot === "string"
+        ? {
+            id: getWorkspacePaneId(slot, index),
+            type,
+            tableState: createDefaultTablePaneState(),
+            diagramState: createDefaultDiagramState(),
+          }
+        : slot;
+
+      if (type === "table") {
+        const tableState = normalizeWorkspaceTableState(pane.tableState);
+        if (tableState.documentId !== deletedDocumentId) return pane;
+        return {
+          ...pane,
+          tableState: {
+            ...tableState,
+            documentId: fallbackDocumentId,
+            selectedCells: [],
+            selectionRanges: [],
+            selectionAnchor: null,
+          },
+        };
+      }
+
+      if (type === "diagrams") {
+        const diagramState = normalizeWorkspaceDiagramState(pane.diagramState);
+        if (diagramState.sourceDocumentId !== deletedDocumentId) return pane;
+        return {
+          ...pane,
+          diagramState: {
+            ...createDefaultDiagramState(),
+            activeView: normalizeDiagramView(diagramState.activeView),
+          },
+        };
+      }
+
+      return pane;
+    });
+
+    setWorkspaceSlots(nextSlots);
+    setWorkspacePaneWidths((widths) => (
+      widths.length === nextSlots.length ? widths : createEqualPaneWidths(nextSlots.length)
+    ));
+    syncWorkspaceToolFlags(nextSlots);
+  }
+
+  function touchProjectVersionForDocument(documentId, savedData) {
+    const versionForDocument = getProjectVersionForDocumentId(documentId);
+    if (!versionForDocument) return;
+
+    const updatedAt = savedData?.project?.updated_at || new Date().toISOString();
+    setProjectVersions((versions) =>
+      versions.map((version) =>
+        version.id === versionForDocument.id
+          ? {
+              ...version,
+              updatedAt,
+            }
+          : version,
+      ),
+    );
+  }
+
   function toggleProjectMenu(event) {
     event.stopPropagation();
+    setIsVersionMenuOpen(false);
     setIsProjectMenuOpen((isOpen) => !isOpen);
   }
 
@@ -1749,11 +2547,16 @@ export default function App() {
   function createWorkspacePane(type, tableDocumentId = DEFAULT_TABLE_DOCUMENT_ID) {
     const id = `workspace-pane-${nextWorkspacePaneId.current}`;
     nextWorkspacePaneId.current += 1;
+    const diagramState = createDefaultDiagramState();
+    if (type === "diagrams") {
+      diagramState.sourceDocumentId = getActiveVersionDocumentId();
+    }
+
     return {
       id,
       type,
       tableState: createDefaultTablePaneState(tableDocumentId),
-      diagramState: createDefaultDiagramState(),
+      diagramState,
     };
   }
 
@@ -2428,6 +3231,27 @@ export default function App() {
       sourceProgramData,
       getEffectiveStackingSettingsForProgramData(sourceProgramData, paneSettings),
     );
+  }
+
+  function createDiagramStateForSourceDocument(documentId, sourceProgramData, baseDiagramState, activeView) {
+    const normalizedBaseState = normalizeWorkspaceDiagramState(baseDiagramState ?? createDefaultDiagramState());
+    const stackingSettings = getEffectiveStackingSettingsForProgramData(
+      sourceProgramData,
+      normalizedBaseState.stackingSettings ?? createDefaultStackingSettings(),
+    );
+    const blockingValidation = validateBlockingSettingsForProgramData(
+      sourceProgramData,
+      normalizedBaseState.blockingSettings,
+    );
+
+    return normalizeWorkspaceDiagramState({
+      ...normalizedBaseState,
+      activeView: normalizeDiagramView(activeView ?? normalizedBaseState.activeView),
+      sourceDocumentId: documentId || DEFAULT_TABLE_DOCUMENT_ID,
+      stackingSettings,
+      blockingSettings: blockingValidation.settings,
+      stackingDiagram: buildStackingDiagramForSource(sourceProgramData, stackingSettings),
+    });
   }
 
   function updateWorkspaceStackingDiagramsForDocument(documentId, sourceProgramData) {
@@ -4902,6 +5726,7 @@ export default function App() {
       );
       const savedData = await putProgramData(nextData);
       setTableDocumentFromData(documentId, savedData, { rebuildStackingConflicts: true });
+      touchProjectVersionForDocument(documentId, savedData);
       setStatusMessage("Saved.");
       setIsExitConfirmOpen(false);
       await refreshAvailableProgramDataFiles();
@@ -5104,6 +5929,16 @@ export default function App() {
     );
   }
 
+  function renderVersionStackIcon() {
+    return (
+      <svg className="version-stack-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <rect className="version-icon-back" x="10.2" y="4.4" width="9.6" height="14" rx="0.5" />
+        <rect className="version-icon-back" x="6.9" y="5.7" width="9.6" height="14" rx="0.5" />
+        <rect className="version-icon-front" x="3.6" y="7" width="9.6" height="14" rx="0.5" />
+      </svg>
+    );
+  }
+
   function renderBlockingToolIcon(tool) {
     switch (tool) {
       case BLOCKING_TOOL_RECTANGLE:
@@ -5155,6 +5990,20 @@ export default function App() {
           <circle cx="12" cy="12" r="2" />
           <circle cx="19" cy="12" r="2" />
         </svg>
+      </button>
+    );
+  }
+
+  function renderVersionMenuButton(className = "") {
+    return (
+      <button
+        className={`project-menu-button version-menu-button${className ? ` ${className}` : ""}`}
+        type="button"
+        onClick={toggleVersionMenu}
+        aria-label="Version menu"
+        aria-expanded={isVersionMenuOpen}
+      >
+        {renderVersionStackIcon()}
       </button>
     );
   }
@@ -5230,6 +6079,8 @@ export default function App() {
         </button>
         {side === "right" && (
           <>
+            {renderVersionMenuButton("workspace-version-menu-button")}
+            {isVersionMenuOpen && renderVersionActionsMenu("is-workspace-menu")}
             {renderProjectMenuButton("workspace-project-menu-button")}
             {isProjectMenuOpen && renderProjectActionsMenu("is-workspace-menu")}
           </>
@@ -5249,11 +6100,20 @@ export default function App() {
       ...(diagramState.stackingSettings ?? {}),
     };
     const paneBlockingSettings = normalizeBlockingSettings(diagramState.blockingSettings);
-    const paneStackingDiagram = diagramState.stackingDiagram ?? null;
     const paneSourceDocumentId = diagramState.sourceDocumentId ?? "";
     const diagramSourceOptions = getAvailableTableDocumentOptions(paneSourceDocumentId);
-    const selectedSourceDocumentId = diagramSourceOptions.some((file) => file.id === paneSourceDocumentId) ? paneSourceDocumentId : "";
-    const selectedSourceProgramData = selectedSourceDocumentId ? tableDocuments[selectedSourceDocumentId]?.programData : null;
+    const diagramSourceOptionIds = new Set(diagramSourceOptions.map((file) => file.id));
+    const selectedSourceDocumentId = diagramSourceOptionIds.has(paneSourceDocumentId)
+      ? paneSourceDocumentId
+      : diagramSourceOptions[0]?.id ?? "";
+    const selectedSourceProgramData = selectedSourceDocumentId
+      ? tableDocuments[selectedSourceDocumentId]?.programData ?? getTableDocument(selectedSourceDocumentId)?.programData
+      : null;
+    const paneStackingDiagram = diagramState.stackingDiagram ?? (
+      selectedSourceProgramData
+        ? buildStackingDiagramForSource(selectedSourceProgramData, paneStackingSettings)
+        : null
+    );
     const effectivePaneStackingSettings = selectedSourceProgramData
       ? getEffectiveStackingSettingsForProgramData(selectedSourceProgramData, paneStackingSettings)
       : paneStackingSettings;
@@ -5294,6 +6154,9 @@ export default function App() {
     const activeBlockingLevelLabel =
       LEVEL_OF_DETAIL_OPTIONS.find((option) => option.value === activeBlockingLevelOfDetail)?.label ?? "Program";
     const titleId = `diagrams-title-${paneIndex}`;
+    const diagramVersionLabel = selectedSourceDocumentId
+      ? getVersionLabelForDocumentId(selectedSourceDocumentId)
+      : getActiveVersionLabel();
 
     const updateDiagramState = (updater) => {
       updateWorkspacePane(paneId, (pane) => ({
@@ -5559,20 +6422,28 @@ export default function App() {
           });
         }
 
-        const nextSettings = getEffectiveStackingSettingsForProgramData(sourceProgramData, paneStackingSettings);
-        const stackingDiagram = buildStackingDiagramForSource(sourceProgramData, nextSettings);
+        const currentSourceDocumentId = paneSourceDocumentId || selectedSourceDocumentId;
+        if (currentSourceDocumentId) {
+          updateProjectVersionDiagramStateForDocument(currentSourceDocumentId, {
+            ...diagramState,
+            sourceDocumentId: currentSourceDocumentId,
+          });
+        }
 
-        updateDiagramState((currentState) => {
-          const blockingValidation = validateBlockingSettingsForProgramData(sourceProgramData, currentState.blockingSettings);
+        const sourceVersion = getProjectVersionForDocumentId(sourceDocumentId);
+        if (sourceVersion) setActiveVersionId(sourceVersion.id);
+        const sourceDiagramState = sourceVersion
+          ? getProjectVersionDiagramStateForDocument(sourceDocumentId)
+          : createDefaultDiagramState();
+        const nextDiagramState = createDiagramStateForSourceDocument(
+          sourceDocumentId,
+          sourceProgramData,
+          sourceDiagramState,
+          paneActiveDiagramView,
+        );
+        updateProjectVersionDiagramStateForDocument(sourceDocumentId, nextDiagramState);
 
-          return {
-            ...currentState,
-            sourceDocumentId,
-            stackingSettings: nextSettings,
-            blockingSettings: blockingValidation.settings,
-            stackingDiagram,
-          };
-        });
+        updateDiagramState(() => nextDiagramState);
       } catch (error) {
         setErrorMessage(error.message);
       }
@@ -5614,7 +6485,7 @@ export default function App() {
     return (
       <section className="diagrams-panel diagrams-app" id={`diagrams-panel-${paneIndex}`} aria-labelledby={titleId}>
         <header className="diagrams-panel-header">
-          <h2 id={titleId}>Diagrams</h2>
+          <h2 id={titleId}>V. {diagramVersionLabel} / Diagrams</h2>
         </header>
         <div
           className="diagrams-panel-body"
@@ -6076,6 +6947,22 @@ export default function App() {
     );
   }
 
+  function renderVersionActionsMenu(className = "") {
+    return (
+      <div className={`project-actions-menu version-actions-menu${className ? ` ${className}` : ""}`} role="menu" onClick={(event) => event.stopPropagation()}>
+        <button type="button" role="menuitem" onClick={openNewVersionDialog}>
+          New Version
+        </button>
+        <button type="button" role="menuitem" onClick={openDuplicateVersionDialog} disabled={projectVersions.length === 0}>
+          Duplicate Existing Version
+        </button>
+        <button type="button" role="menuitem" onClick={requestDeleteVersion} disabled={projectVersions.length <= 1}>
+          Delete Version
+        </button>
+      </div>
+    );
+  }
+
   function renderHierarchyNode(node, documentId, paneId, depth) {
     const isOpen = isHierarchyNodeOpen(paneId, documentId, node.key, depth);
     const showNodeConflictButton = shouldShowHierarchyNodeConflictButton(documentId, node, isOpen);
@@ -6298,10 +7185,10 @@ export default function App() {
     const isPaneImporting = activeSpreadsheetImportPaneId === paneId && isImporting;
     const shouldShowLoading = isLoading && (!isImporting || !activeSpreadsheetImportPaneId || isPaneImporting);
     const spreadsheetTitleValue = tableDocument.draftProjectName ?? "";
-    const spreadsheetTitle = spreadsheetTitleValue || "Untitled Project";
+    const spreadsheetTitle = spreadsheetTitleValue || DEFAULT_DOCUMENT_TITLE;
+    const spreadsheetVersionLabel = getVersionLabelForDocumentId(documentId);
     const isTitleMenuOpen = openSpreadsheetTitlePaneId === paneId;
     const documentOptions = getAvailableTableDocumentOptions(documentId);
-    const selectableDocumentOptions = documentOptions.filter((option) => option.id !== documentId);
     const paneConflicts = getUnresolvedStackingConflictsForDocument(documentId);
     const paneConflictCount = paneConflicts.length;
     const paneConflictLabel = paneConflictCount === 1 ? "1 conflict" : `${paneConflictCount} conflicts`;
@@ -6323,13 +7210,14 @@ export default function App() {
             className={`program-title-dropdown${isTitleMenuOpen ? " is-open" : ""}`}
             onClick={(event) => event.stopPropagation()}
           >
+            <span className="pane-version-prefix">V. {spreadsheetVersionLabel} / </span>
             <span className="program-title-editor-wrap" data-value={spreadsheetTitle}>
               <input
                 id={titleId}
                 className="program-title-input program-title-editor"
                 type="text"
                 value={spreadsheetTitleValue}
-                placeholder="Untitled Project"
+                placeholder={DEFAULT_DOCUMENT_TITLE}
                 aria-label="Spreadsheet title"
                 onChange={(event) => updateSpreadsheetTitle(documentId, event.target.value)}
                 onFocus={() => setActiveTablePaneId(paneId)}
@@ -6347,14 +7235,15 @@ export default function App() {
             </button>
             {isTitleMenuOpen && (
               <div className="program-title-menu" role="menu" aria-label="Spreadsheet options">
-                {selectableDocumentOptions.map((option) => (
+                {documentOptions.map((option) => (
                   <button
                     className="program-title-menu-item"
                     type="button"
                     role="menuitem"
                     key={option.id}
                     title={option.path || option.label}
-                    disabled={loadingProgramDataFileId === option.id}
+                    aria-current={option.id === documentId ? "true" : undefined}
+                    disabled={loadingProgramDataFileId === option.id || option.id === documentId}
                     onClick={() => selectTableDocumentForPane(paneId, option.id)}
                   >
                     {loadingProgramDataFileId === option.id ? "Loading" : option.label}
@@ -6795,6 +7684,105 @@ export default function App() {
     );
   }
 
+  function renderVersionDialogs() {
+    const activeVersion = getActiveProjectVersion();
+
+    return (
+      <>
+        {versionDialogMode && (
+          <div className="version-dialog-layer" role="presentation">
+            <form
+              className="version-dialog"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="version-dialog-title"
+              onSubmit={handleVersionDialogSubmit}
+            >
+              <header className="version-dialog-header">
+                <h3 id="version-dialog-title">
+                  {versionDialogMode === "duplicate" ? "Duplicate Existing Version" : "Create New Version"}
+                </h3>
+              </header>
+              <div className="version-dialog-body">
+                <label className="version-dialog-field" htmlFor="version-name-input">
+                  <span>Name</span>
+                  <input
+                    id="version-name-input"
+                    type="text"
+                    value={versionDraftName}
+                    onChange={(event) => setVersionDraftName(event.target.value)}
+                    autoFocus
+                  />
+                </label>
+
+                {versionDialogMode === "duplicate" && (
+                  <label className="version-dialog-field" htmlFor="version-source-select">
+                    <span>Source</span>
+                    <select
+                      id="version-source-select"
+                      value={versionDraftSourceId}
+                      onChange={(event) => setVersionDraftSourceId(event.target.value)}
+                      required
+                    >
+                      {projectVersions.map((version) => (
+                        <option key={version.id} value={version.id}>
+                          {version.name || "Untitled Version"}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+
+                <label className="version-dialog-field" htmlFor="version-date-input">
+                  <span>Date</span>
+                  <input
+                    id="version-date-input"
+                    type="date"
+                    value={versionDraftDate}
+                    onChange={(event) => setVersionDraftDate(event.target.value)}
+                  />
+                </label>
+              </div>
+              <footer className="version-dialog-footer">
+                <button className="secondary-button" type="button" onClick={closeVersionDialog}>
+                  Cancel
+                </button>
+                <button className="primary-button" type="submit">
+                  Create
+                </button>
+              </footer>
+            </form>
+          </div>
+        )}
+
+        {isDeleteVersionConfirmOpen && (
+          <div className="version-dialog-layer" role="presentation">
+            <section
+              className="confirm-dialog"
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="delete-version-title"
+              aria-describedby="delete-version-description"
+            >
+              <h3 id="delete-version-title">Delete Version?</h3>
+              <p id="delete-version-description">
+                Delete {activeVersion?.name || "this version"} from this project?
+              </p>
+              <div className="confirm-actions">
+                <button className="secondary-button" type="button" onClick={() => setIsDeleteVersionConfirmOpen(false)}>
+                  Cancel
+                </button>
+                <button className="danger-button" type="button" onClick={deleteActiveProjectVersion}>
+                  Delete Version
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
+      </>
+    );
+  }
+
   function renderTableOverlays() {
     return (
       <>
@@ -7091,7 +8079,11 @@ export default function App() {
           </div>
         )}
 
+        {!isWorkspaceActive && renderVersionMenuButton()}
+
         {!isWorkspaceActive && renderProjectMenuButton()}
+
+        {!isWorkspaceActive && isVersionMenuOpen && renderVersionActionsMenu()}
 
         {!isWorkspaceActive && isProjectMenuOpen && renderProjectActionsMenu()}
 
@@ -7109,6 +8101,8 @@ export default function App() {
         )}
 
       </div>
+
+      {renderVersionDialogs()}
 
       {isStartDialogOpen && (
         <div className="startup-layer" role="presentation">
@@ -12768,8 +13762,9 @@ function createImportedTableDocumentId(file) {
 
 function isSelectableSpreadsheetOption(option) {
   if (!option?.id) return false;
-  if (Number(option.rowCount) === 0) return false;
+  if (Number(option.rowCount) === 0 && option.source !== "version" && option.source !== "loaded" && option.source !== "pane") return false;
   if (option.source === "loaded" || option.source === "pane") return true;
+  if (option.source === "version") return true;
   if (!isSavedProgramDataDocumentId(option.id) && !isImportedSpreadsheetDocumentId(option.id)) return false;
   return true;
 }
@@ -12941,7 +13936,7 @@ function getProgramTitle(data) {
   return (
     normalizeProjectName(data?.project?.name) ||
     stripFileExtension(data?.project?.source_files?.[0]?.name) ||
-    "Untitled Project"
+    DEFAULT_DOCUMENT_TITLE
   );
 }
 
@@ -12959,9 +13954,46 @@ function sanitizeFileName(value) {
     .slice(0, 80) || "signal-project";
 }
 
-function createEmptyProgramData(projectName = "Untitled Project") {
+function getTodayDateInputValue() {
+  const date = new Date();
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function getDateInputValue(value) {
+  if (!value) return "";
+
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return normalizeDateInputValue(value);
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function normalizeDateInputValue(value) {
+  const normalized = String(value ?? "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : "";
+}
+
+function getIsoStringForDateInput(value) {
+  const normalized = normalizeDateInputValue(value);
+  if (!normalized) return "";
+
+  const [year, month, day] = normalized.split("-").map(Number);
+  return new Date(year, month - 1, day).toISOString();
+}
+
+function cloneJsonValue(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function createEmptyProgramData(projectName = DEFAULT_DOCUMENT_TITLE) {
   const now = new Date().toISOString();
-  const name = normalizeProjectName(projectName) || "Untitled Project";
+  const name = normalizeProjectName(projectName) || DEFAULT_DOCUMENT_TITLE;
 
   return {
     schema_version: "1.0.0",
@@ -13351,7 +14383,7 @@ function getProgramDiagramFloorRowIdSet(programData, activeFloor) {
 }
 
 function isProgramItemOnBlockingDiagramFloor(programData, item, activeFloor) {
-  const diagramFloorId = getProgramItemExplicitDiagramFloorId(item);
+  const diagramFloorId = getProgramItemDiagramFloorId(item);
   if (!diagramFloorId || !activeFloor) return false;
 
   const activeFloorKey = String(activeFloor.key ?? "").trim();

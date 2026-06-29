@@ -16,6 +16,7 @@ const savedProgramPath = path.resolve(rootDir, "output/program_data.saved.json")
 const parsedProgramDataDir = path.resolve(rootDir, "output/parsed");
 const currentProjectPath = path.resolve(rootDir, "output/current_project.signal");
 const schemaPath = path.resolve(rootDir, "input_test/program_schema.json");
+const DEFAULT_DOCUMENT_TITLE = "Untitled";
 
 export default defineConfig({
   plugins: [react(), programDataApi()],
@@ -307,6 +308,7 @@ async function listProjectProgramDataFiles() {
       label: version.label || getProgramDataTitle(data, path.basename(version.path)),
       path: version.path,
       source: "project",
+      documentId: version.document_id ?? "",
       createdAt: version.created_at ?? data.project?.updated_at ?? data.project?.created_at ?? null,
       rowCount: data.program_items.length,
       schemaVersion: data.schema_version ?? version.schema_version ?? null,
@@ -366,9 +368,9 @@ async function readInitialProgramData() {
   );
 }
 
-function createEmptyProgramData(projectName = "Untitled Project") {
+function createEmptyProgramData(projectName = DEFAULT_DOCUMENT_TITLE) {
   const now = new Date().toISOString();
-  const name = String(projectName ?? "").trim() || "Untitled Project";
+  const name = String(projectName ?? "").trim() || DEFAULT_DOCUMENT_TITLE;
 
   return {
     schema_version: "1.0.0",
@@ -421,7 +423,7 @@ function isUsableProgramData(data) {
 }
 
 function getProgramDataTitle(data, fallbackLabel) {
-  return String(data?.project?.name ?? fallbackLabel ?? "Untitled Project").trim() || "Untitled Project";
+  return String(data?.project?.name ?? fallbackLabel ?? DEFAULT_DOCUMENT_TITLE).trim() || DEFAULT_DOCUMENT_TITLE;
 }
 
 function slugify(value) {

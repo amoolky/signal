@@ -1,11 +1,12 @@
 import zlib from "node:zlib";
 
 export const SIGNAL_PROJECT_FORMAT = "signal.project";
-export const SIGNAL_PROJECT_VERSION = "0.1.0";
+export const SIGNAL_PROJECT_VERSION = "0.2.0";
 
 const DEFAULT_PROGRAM_DISPLAY_PATH = "tables/program/display.json";
 const DEFAULT_WORKSPACE_SESSION_PATH = "workspace/session.json";
 const DEFAULT_TABLE_DOCUMENT_ID = "default-table-document";
+const DEFAULT_DOCUMENT_TITLE = "Untitled";
 
 export function createSignalProjectArchive({ programData, tableState = {}, workspaceState = {}, existingArchiveBuffer } = {}) {
   if (!programData || typeof programData !== "object") {
@@ -26,12 +27,17 @@ export function createSignalProjectArchive({ programData, tableState = {}, works
     programDocuments.find((document) => document.documentId === DEFAULT_TABLE_DOCUMENT_ID) ??
     programDocuments[0];
   const now = new Date().toISOString();
-  const projectName = currentProgramDocument?.data?.project?.name || programData.project?.name || "Untitled Project";
+  const projectName = currentProgramDocument?.data?.project?.name || programData.project?.name || DEFAULT_DOCUMENT_TITLE;
   const projectId = currentProgramDocument?.data?.project?.id || programData.project?.id || slugify(projectName);
   const programVersions = createProgramVersionEntries(programDocuments, entries, now);
   const currentProgramVersion =
     programVersions.find((version) => version.document_id === currentProgramDocument?.documentId) ??
     programVersions[0];
+  const projectVersions = createProjectVersionEntries(normalizedWorkspaceState, programVersions, entries, now);
+  const currentProjectVersion =
+    projectVersions.find((version) => version.id === normalizedWorkspaceState.activeVersionId) ??
+    projectVersions.find((version) => version.program_path === currentProgramVersion?.path) ??
+    projectVersions[0];
 
   const manifest = {
     format: SIGNAL_PROJECT_FORMAT,
@@ -44,7 +50,9 @@ export function createSignalProjectArchive({ programData, tableState = {}, works
     },
     current: {
       program_version_id: currentProgramVersion.id,
+      version_id: currentProjectVersion?.id ?? null,
     },
+    versions: projectVersions,
     program_versions: programVersions,
     table_displays: {
       program: {
@@ -80,7 +88,7 @@ export function getSignalProjectProgramDataDocuments({ programData, workspaceSta
     documents.push({
       documentId,
       data: tableProgramData,
-      label: tableDocument?.draftProjectName || tableProgramData.project?.name || "Untitled Project",
+      label: tableDocument?.draftProjectName || tableProgramData.project?.name || DEFAULT_DOCUMENT_TITLE,
     });
   }
 
@@ -88,7 +96,7 @@ export function getSignalProjectProgramDataDocuments({ programData, workspaceSta
     documents.push({
       documentId: DEFAULT_TABLE_DOCUMENT_ID,
       data: programData,
-      label: programData?.project?.name || "Untitled Project",
+      label: programData?.project?.name || DEFAULT_DOCUMENT_TITLE,
     });
   }
 
@@ -109,7 +117,7 @@ function createProgramVersionEntries(programDocuments, entries, now) {
 
     return {
       id,
-      label: document.label || document.data?.project?.name || "Untitled Project",
+      label: document.label || document.data?.project?.name || DEFAULT_DOCUMENT_TITLE,
       created_at: sourceFile?.imported_at ?? document.data?.project?.created_at ?? now,
       updated_at: document.data?.project?.updated_at ?? now,
       path,
@@ -121,9 +129,53 @@ function createProgramVersionEntries(programDocuments, entries, now) {
   });
 }
 
+function createProjectVersionEntries(workspaceState, programVersions, entries, now) {
+  removeProjectVersionEntries(entries);
+
+  const storedVersions = Array.isArray(workspaceState?.projectVersions) ? workspaceState.projectVersions : [];
+  if (storedVersions.length === 0) return [];
+
+  const programVersionsByDocumentId = new Map(programVersions.map((version) => [String(version.document_id ?? ""), version]));
+  const usedIds = new Set();
+
+  return storedVersions
+    .map((version, index) => {
+      const id = uniqueId(slugify(version?.id || version?.name || `version-${index + 1}`), usedIds);
+      const documentId = String(version?.documentId || version?.document_id || "");
+      const programVersion = programVersionsByDocumentId.get(documentId);
+      if (!programVersion?.path) return null;
+
+      const diagramPath = `versions/${id}/diagram_state.json`;
+      entries.set(diagramPath, jsonBuffer(normalizeDiagramState(version?.diagramState || version?.diagram_state)));
+
+      return {
+        id,
+        label: version?.name || version?.label || programVersion.label || `Version ${index + 1}`,
+        date: normalizeDateInputValue(version?.date),
+        created_at: version?.createdAt || version?.created_at || programVersion.created_at || now,
+        updated_at: version?.updatedAt || version?.updated_at || programVersion.updated_at || now,
+        program_path: programVersion.path,
+        diagram_path: diagramPath,
+        table_display_path: null,
+        document_id: documentId,
+        row_count: programVersion.row_count ?? 0,
+        status: "active",
+      };
+    })
+    .filter(Boolean);
+}
+
 function removeProgramDataEntries(entries) {
   for (const entryName of [...entries.keys()]) {
     if (/^programs\/[^/]+\/program_data\.json$/.test(entryName)) {
+      entries.delete(entryName);
+    }
+  }
+}
+
+function removeProjectVersionEntries(entries) {
+  for (const entryName of [...entries.keys()]) {
+    if (/^versions\/[^/]+\/diagram_state\.json$/.test(entryName)) {
       entries.delete(entryName);
     }
   }
@@ -167,8 +219,13 @@ export function readSignalProjectArchive(buffer, { includeEntries = false } = {}
     throw new Error("This is not a SIGNAL project file.");
   }
 
+  const currentProjectVersionId = manifest.current?.version_id;
+  const projectVersion =
+    manifest.versions?.find((version) => version.id === currentProjectVersionId) ??
+    manifest.versions?.at(-1);
   const currentVersionId = manifest.current?.program_version_id;
   const programVersion =
+    (projectVersion?.program_path ? { ...projectVersion, path: projectVersion.program_path } : null) ??
     manifest.program_versions?.find((version) => version.id === currentVersionId) ??
     manifest.program_versions?.at(-1);
 
@@ -180,7 +237,11 @@ export function readSignalProjectArchive(buffer, { includeEntries = false } = {}
   const tableDisplayPath = manifest.table_displays?.program?.path ?? DEFAULT_PROGRAM_DISPLAY_PATH;
   const tableState = entries.has(tableDisplayPath) ? parseJsonEntry(entries, tableDisplayPath) : {};
   const workspaceSessionPath = manifest.workspace_session?.path ?? DEFAULT_WORKSPACE_SESSION_PATH;
-  const workspaceState = entries.has(workspaceSessionPath) ? parseJsonEntry(entries, workspaceSessionPath) : {};
+  const workspaceState = hydrateWorkspaceVersionsFromManifest(
+    entries.has(workspaceSessionPath) ? parseJsonEntry(entries, workspaceSessionPath) : {},
+    manifest,
+    entries,
+  );
 
   return {
     manifest,
@@ -188,6 +249,56 @@ export function readSignalProjectArchive(buffer, { includeEntries = false } = {}
     tableState,
     workspaceState,
     ...(includeEntries ? { entries } : {}),
+  };
+}
+
+function hydrateWorkspaceVersionsFromManifest(workspaceState, manifest, entries) {
+  const normalizedWorkspaceState = normalizeWorkspaceState(workspaceState);
+  const manifestVersions = Array.isArray(manifest?.versions) ? manifest.versions : [];
+  if (manifestVersions.length === 0) return normalizedWorkspaceState;
+
+  const storedVersions = Array.isArray(normalizedWorkspaceState.projectVersions)
+    ? normalizedWorkspaceState.projectVersions
+    : [];
+  const storedVersionsById = new Map(storedVersions.map((version) => [String(version?.id ?? ""), version]));
+  const tableDocuments = isPlainObject(normalizedWorkspaceState.tableDocuments)
+    ? { ...normalizedWorkspaceState.tableDocuments }
+    : {};
+  const versions = manifestVersions.map((version) => {
+    const storedVersion = storedVersionsById.get(String(version.id ?? "")) ?? {};
+    const documentId = storedVersion.documentId || version.document_id || "";
+    const diagramState = version.diagram_path && entries.has(version.diagram_path)
+      ? JSON.parse(entries.get(version.diagram_path).toString("utf8"))
+      : storedVersion.diagramState ?? {};
+    const programData = version.program_path && entries.has(version.program_path)
+      ? JSON.parse(entries.get(version.program_path).toString("utf8"))
+      : null;
+
+    if (documentId && programData && !tableDocuments[documentId]) {
+      tableDocuments[documentId] = {
+        programData,
+        draftProjectName: programData.project?.name || DEFAULT_DOCUMENT_TITLE,
+      };
+    }
+
+    return {
+      id: String(version.id ?? storedVersion.id ?? ""),
+      name: storedVersion.name || version.label || "Untitled Version",
+      date: storedVersion.date || version.date || null,
+      documentId,
+      createdAt: storedVersion.createdAt || version.created_at || null,
+      updatedAt: storedVersion.updatedAt || version.updated_at || null,
+      diagramState,
+    };
+  }).filter((version) => version.id);
+
+  if (versions.length === 0) return normalizedWorkspaceState;
+
+  return {
+    ...normalizedWorkspaceState,
+    activeVersionId: normalizedWorkspaceState.activeVersionId || manifest.current?.version_id || versions[0].id,
+    projectVersions: versions,
+    tableDocuments,
   };
 }
 
@@ -202,6 +313,15 @@ function normalizeTableState(tableState) {
 
 function normalizeWorkspaceState(workspaceState) {
   return workspaceState && typeof workspaceState === "object" ? workspaceState : {};
+}
+
+function normalizeDiagramState(diagramState) {
+  return isPlainObject(diagramState) ? diagramState : {};
+}
+
+function normalizeDateInputValue(value) {
+  const normalized = String(value ?? "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : null;
 }
 
 function parseJsonEntry(entries, entryName) {

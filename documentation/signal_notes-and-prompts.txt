@@ -164,3 +164,40 @@ any geometry drawn on an LOD should not be editable on another LOD. eg. a depart
 the current LOD should display the geometry of the LOD directly above it (in every case but functional group) as a PREVIEW ONLY: it should NOT be editable, but instead just a grayed outline. make the text labels very light opacity and behind any geometry and text in the current LOD.
 
 if the user assigns a hierarchical attribute to a higher LOD, but a lower LOD conflicts with it, then use the same information conflict UI to place the warning icon along with a description next to the higher LOD geometry with the conflict. an example: user draws geometry in department level and gives it department A from the programming tab. user then switches to functional area LOD and draws a geometry outside of the bounding area of department A, then assigns it functional area A1 (under department A). since the lower LOD (functional area) is conflicting with the higher LOD (department), the lower LOD is the 'source of truth'. therefore, place the warning icon with a description and remedy options in the department LOD only, but show a faded preview of it in the functional area LOD. the remedies for a geometry conflict: (1) Update area to include {Program} (2) Recalculate area to fit child functional areas (3) Ignore temporarily. no need to assign actual fixes yet, just code in the UI.
+
+
+
+from plan mode on versioning, but not implemented yet:
+
+Selection should cross-highlight by stable IDs. If a room/program row is selected in Version A, highlight the matching item in Version B when it exists. If it does not exist, show it as removed/missing.
+
+For comparing, let the user select two versions and click Compare. That should open locked side-by-side panes:
+
+Table vs table
+Diagram vs diagram
+Optional four-panel layout: table + diagram for both versions
+
+Comparison mode should default to read-only, with an explicit Edit This Version control in each pane. That single choice will prevent a lot of “wait, which option did I just change?” confusion.
+
+
+versioning prompt:
+
+execute the versioning plan above, with the following notes:
+
+exclude all of the following from the versioning changes: "Selection should cross-highlight by stable IDs. If a room/program row is selected in Version A, highlight the matching item in Version B when it exists. If it does not exist, show it as removed/missing.
+
+For comparing, let the user select two versions and click Compare. That should open locked side-by-side panes:
+
+Table vs table
+Diagram vs diagram
+Optional four-panel layout: table + diagram for both versions
+
+Comparison mode should default to read-only, with an explicit Edit This Version control in each pane. That single choice will prevent a lot of “wait, which option did I just change?” confusion."
+
+for the versioning menu, add a button above the file management button with 3 dots at the bottom right. use the same button style, but make the icon a rectangle (black outline, black fill) with two more rectangles arrayed behind horizontally (black outline, white fill) but arrayed so that they are overlapping. hover state should invert the style. in the menu, there should be the following options:
+
+- New Version: should open a pop-up menu in the center of the screen labeled "Create New Version" and with the fields "Name" (text entry) and "Date" (should default to today's date but allow the user to change it). buttons at the bottom of the pop-up dialog should be "Cancel" and "Create". When a new version is created, keep the current panel view but clear the source/loaded document for all panels.
+- Duplicate Existing Version: should be identical to "New Version", but below "Name" field and above "Date" field, should contain a dropdown with "Source" label, which should contain a list of all existing versions that the user can choose to duplicate from. When an existing version is duplicated, keep the current panel view and change all of the sources/loaded documents to the duplicated ones in the new version.
+- Delete Version: should open a pop-up menu in the center of the screen with a confirmation message, and two buttons: "Cancel" and "Delete Version". When a version is deleted, clear all information related to that version from the project file.
+
+in the title for all spreadsheets at the top of the spreadsheets panel and the diagrams title in the diagrams panel, include the following prefix: "V. {version name} / "
